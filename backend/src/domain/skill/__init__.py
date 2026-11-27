@@ -43,7 +43,7 @@ from domain.skill.model import (
     SkillVersion,
     SkillVersionPage,
 )
-from domain.skill.ports import UNSET, SkillRepository, UnsetType
+from domain.skill.ports import SkillRepository
 
 __all__ = [
     "MAX_GUIDE_CHARACTERS",
@@ -88,6 +88,4 @@ __all__ = [
     "SkillScope",
     "SkillVersion",
     "SkillVersionPage",
-    "UNSET",
-    "UnsetType",
 ]

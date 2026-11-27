@@ -1,4 +1,5 @@
 import { ApiError } from "../../shared/api/client";
+import { createApiErrorMessage } from "../../shared/api/errorMessage";
 
 const CHAT_ERROR_COPY: Record<string, string> = {
   run_already_active: "该会话已有运行中的任务，请等待完成或先停止。",
@@ -40,24 +41,12 @@ const CHAT_ERROR_COPY: Record<string, string> = {
   knowledge_base_ids_invalid: "所选知识库范围无效，请重新选择。",
   run_model_profile_id_invalid: "所选模型标识无效，请重新选择模型后重试。",
   model_profile_unavailable: "所选模型当前不可用，请切换其他模型后重试。",
-  network_error: "无法连接服务器，请检查网络后重试。",
-  http_error: "服务器拒绝了本次请求，请稍后重试。",
-  invalid_response: "服务器返回了无法识别的响应，请稍后重试。",
 };
 
-export function chatErrorMessage(error: unknown): string {
-  if (
-    error instanceof ApiError &&
-    Object.hasOwn(CHAT_ERROR_COPY, error.detail)
-  ) {
-    return CHAT_ERROR_COPY[error.detail];
-  }
-  return "运行操作未完成，请稍后重试。";
-}
-
-export function isNetworkError(error: unknown): boolean {
-  return error instanceof ApiError && error.detail === "network_error";
-}
+export const chatErrorMessage = createApiErrorMessage(
+  CHAT_ERROR_COPY,
+  "运行操作未完成，请稍后重试。",
+);
 
 export function requestIdCanBeReused(error: unknown): boolean {
   if (!(error instanceof ApiError)) {
@@ -66,10 +55,8 @@ export function requestIdCanBeReused(error: unknown): boolean {
   // 网络失败、服务端 5xx 或成功响应无法解析时，服务端可能已经提交命令，
   // 下一次重试必须复用同一 request_id，避免重复创建运行。
   return (
-    isNetworkError(error) ||
+    error.detail === "network_error" ||
     error.status >= 500 ||
     error.detail === "invalid_response"
   );
 }
-
-

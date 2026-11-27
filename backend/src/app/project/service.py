@@ -8,8 +8,8 @@ from datetime import datetime
 
 from app.project.converter.result import project_page_to_result, project_to_result
 from app.project.model.result import ProjectPageResult, ProjectResult
-from common.date import as_utc
-from common.ids import new_id, now_utc
+from common.date import as_utc, utc_now
+from common.ids import new_id
 from domain.project import (
     InvalidProjectInputError,
     InvalidProjectNameError,
@@ -117,7 +117,7 @@ class ProjectService:
         repository: ProjectRepository,
         *,
         id_factory: Callable[[], str] = _default_id_factory,
-        clock: Callable[[], datetime] = now_utc,
+        clock: Callable[[], datetime] = utc_now,
     ) -> None:
         """保存仓储及可替换的 ID、时钟来源。"""
         self._repository = repository

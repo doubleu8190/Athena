@@ -30,20 +30,6 @@ class McpRuntimeToolTarget:
 
 
 @dataclass(frozen=True, slots=True)
-class McpRuntimeToolDefinition:
-    """One catalog row pinned with its server's current configuration version."""
-
-    tool_id: str
-    server_id: str
-    remote_name: str
-    model_name: str
-    description: str
-    input_schema: dict[str, Any]
-    config_version: int
-    requires_approval: bool = False
-
-
-@dataclass(frozen=True, slots=True)
 class McpCallResult:
     """Bounded, transport-independent projection of a tools/call result."""
 

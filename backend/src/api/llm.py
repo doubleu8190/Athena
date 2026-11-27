@@ -24,9 +24,9 @@ from api.dto.llm import (
 )
 from api.security import AdminAuth, CurrentAuth
 from app.llm.profile_service import ModelProfileService
+from common.unset import UNSET
 from domain.llm.model.compression_policy import CompressionPolicyInput
 from domain.llm.model.profile import (
-    MODEL_PROFILE_UNSET,
     ModelProfileInput,
     ModelProfileUpdateInput,
 )
@@ -125,80 +125,66 @@ def build_llm_admin_router(service: ModelProfileService) -> APIRouter:
                 raise HTTPException(422, "llm_model_profile_invalid")
         patch = ModelProfileUpdateInput(
             expected_version=request.expected_version,
-            name=(MODEL_PROFILE_UNSET if "name" not in fields_set else cast(str, request.name)),
-            base_url=(
-                MODEL_PROFILE_UNSET if "base_url" not in fields_set else cast(str, request.base_url)
-            ),
-            model=(MODEL_PROFILE_UNSET if "model" not in fields_set else cast(str, request.model)),
-            api_key=(MODEL_PROFILE_UNSET if "api_key" not in fields_set else request.api_key),
+            name=(UNSET if "name" not in fields_set else cast(str, request.name)),
+            base_url=(UNSET if "base_url" not in fields_set else cast(str, request.base_url)),
+            model=(UNSET if "model" not in fields_set else cast(str, request.model)),
+            api_key=(UNSET if "api_key" not in fields_set else request.api_key),
             context_window_tokens=(
-                MODEL_PROFILE_UNSET
+                UNSET
                 if "context_window_tokens" not in fields_set
                 else cast(int, request.context_window_tokens)
             ),
             tokenizer_encoding=(
-                MODEL_PROFILE_UNSET
+                UNSET
                 if "tokenizer_encoding" not in fields_set
                 else cast(Literal["cl100k_base", "o200k_base"], request.tokenizer_encoding)
             ),
             supports_stream=(
-                MODEL_PROFILE_UNSET
+                UNSET
                 if "supports_stream" not in fields_set
                 else cast(bool, request.supports_stream)
             ),
             supports_tools=(
-                MODEL_PROFILE_UNSET
-                if "supports_tools" not in fields_set
-                else cast(bool, request.supports_tools)
+                UNSET if "supports_tools" not in fields_set else cast(bool, request.supports_tools)
             ),
             supports_parallel_tool_calls=(
-                MODEL_PROFILE_UNSET
+                UNSET
                 if "supports_parallel_tool_calls" not in fields_set
                 else cast(bool, request.supports_parallel_tool_calls)
             ),
             max_output_tokens=(
-                MODEL_PROFILE_UNSET
+                UNSET
                 if "max_output_tokens" not in fields_set
                 else cast(int, request.max_output_tokens)
             ),
             request_timeout_seconds=(
-                MODEL_PROFILE_UNSET
+                UNSET
                 if "request_timeout_seconds" not in fields_set
                 else cast(int, request.request_timeout_seconds)
             ),
             execution_timeout_seconds=(
-                MODEL_PROFILE_UNSET
+                UNSET
                 if "execution_timeout_seconds" not in fields_set
                 else cast(int, request.execution_timeout_seconds)
             ),
             max_concurrency=(
-                MODEL_PROFILE_UNSET
-                if "max_concurrency" not in fields_set
-                else cast(int, request.max_concurrency)
+                UNSET if "max_concurrency" not in fields_set else cast(int, request.max_concurrency)
             ),
-            temperature=(
-                MODEL_PROFILE_UNSET if "temperature" not in fields_set else request.temperature
-            ),
-            enabled=(
-                MODEL_PROFILE_UNSET if "enabled" not in fields_set else cast(bool, request.enabled)
-            ),
+            temperature=(UNSET if "temperature" not in fields_set else request.temperature),
+            enabled=(UNSET if "enabled" not in fields_set else cast(bool, request.enabled)),
             visible_to_users=(
-                MODEL_PROFILE_UNSET
+                UNSET
                 if "visible_to_users" not in fields_set
                 else cast(bool, request.visible_to_users)
             ),
             scenario_label=(
-                MODEL_PROFILE_UNSET
-                if "scenario_label" not in fields_set
-                else request.scenario_label
+                UNSET if "scenario_label" not in fields_set else request.scenario_label
             ),
             scenario_description=(
-                MODEL_PROFILE_UNSET
-                if "scenario_description" not in fields_set
-                else request.scenario_description
+                UNSET if "scenario_description" not in fields_set else request.scenario_description
             ),
             supports_vision=(
-                MODEL_PROFILE_UNSET
+                UNSET
                 if "supports_vision" not in fields_set
                 else cast(bool, request.supports_vision)
             ),

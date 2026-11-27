@@ -1,15 +1,14 @@
-import { useEffect, useState } from "react";
-
 import {
   canManageSkills,
   isSuperAdmin,
   type User,
   type UserRole,
 } from "../../features/auth/model";
+import { DEFAULT_DESKTOP_BREAKPOINT_PX } from "../../shared/lib/viewport";
 import type { BadgeProps } from "../../shared/ui/Badge";
 
 export const SIDEBAR_COLLAPSED_STORAGE_KEY = "athena.shell.sidebar-collapsed";
-export const DESKTOP_BREAKPOINT_PX = 1024;
+export const DESKTOP_BREAKPOINT_PX = DEFAULT_DESKTOP_BREAKPOINT_PX;
 
 export type ShellAdminIconKey =
   | "models"
@@ -192,40 +191,4 @@ export function writeSidebarCollapsed(collapsed: boolean): void {
   } catch {
     // 浏览器禁用本地存储时仅保持当前会话内存状态，不阻断折叠切换。
   }
-}
-
-function isCurrentViewportDesktop(): boolean {
-  if (typeof window === "undefined") {
-    return true;
-  }
-  return window.innerWidth >= DESKTOP_BREAKPOINT_PX;
-}
-
-/**
- * 监听 >=1024px 桌面端断点，按视口切换固定单层侧栏与移动端 Sheet 抽屉，
- * 避免同时挂载两份侧栏导致重复 Logo、重复请求和无障碍地标冲突。
- */
-export function useIsDesktopViewport(): boolean {
-  const [isDesktop, setIsDesktop] = useState(isCurrentViewportDesktop);
-
-  useEffect(() => {
-    if (typeof window === "undefined") {
-      return;
-    }
-    const updateViewport = () => {
-      setIsDesktop(window.innerWidth >= DESKTOP_BREAKPOINT_PX);
-    };
-    window.addEventListener("resize", updateViewport);
-    const mediaQuery =
-      typeof window.matchMedia === "function"
-        ? window.matchMedia(`(min-width: ${DESKTOP_BREAKPOINT_PX}px)`)
-        : null;
-    mediaQuery?.addEventListener?.("change", updateViewport);
-    return () => {
-      window.removeEventListener("resize", updateViewport);
-      mediaQuery?.removeEventListener?.("change", updateViewport);
-    };
-  }, []);
-
-  return isDesktop;
 }

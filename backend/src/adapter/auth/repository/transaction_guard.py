@@ -10,8 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from adapter.auth.converter.auth import user_to_domain
 from adapter.auth.model.auth import AuthSessionModel, UserModel
-from common.date import as_utc
-from common.ids import now_utc
+from common.date import as_utc, utc_now
 from domain.auth import User, UserStatus
 
 
@@ -28,8 +27,8 @@ async def verify_active_session_user(
     避免后台管理写事务与认证核心表产生跨域行锁争用；仍实时拒绝已停用、已删除、
     已撤销、已过期或角色已变更的身份。
     """
-    # 延迟求值默认时钟，保持单测对模块级 now_utc 的补丁注入有效。
-    current_time = as_utc(now_utc() if clock is None else clock())
+    # 延迟求值默认时钟，保持单测对模块级 utc_now 的补丁注入有效。
+    current_time = as_utc(utc_now() if clock is None else clock())
     user_row = await session.scalar(
         select(UserModel)
         .join(AuthSessionModel, AuthSessionModel.user_id == UserModel.id)
@@ -57,7 +56,7 @@ class SqlAlchemyAuthTransactionGuard:
         self,
         session: AsyncSession,
         *,
-        clock: Callable[[], datetime] = now_utc,
+        clock: Callable[[], datetime] = utc_now,
     ) -> None:
         """保存调用方事务会话和锁后读取的 UTC 时钟。
 

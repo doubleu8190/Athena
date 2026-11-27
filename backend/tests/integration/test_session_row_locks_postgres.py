@@ -35,7 +35,7 @@ from adapter.session.model import SessionModel
 from adapter.session.repository import SqlAlchemySessionRepository
 from app.project.service import ProjectService
 from app.session.service import SessionService
-from common.ids import now_utc
+from common.date import utc_now
 from domain.message import (
     ConversationMessage,
     ConversationMessageDraft,
@@ -1123,7 +1123,7 @@ def test_admin_guard_serializes_with_session_revocation_and_role_changes(
                     async with database_session.begin():
                         expiry_result["user"] = await SqlAlchemyAuthTransactionGuard(
                             database_session,
-                            clock=now_utc,
+                            clock=utc_now,
                         ).lock_current_session_user(expiring_user, expiring_session)
 
             async with holder_factory() as blocking_session:
@@ -1140,7 +1140,7 @@ def test_admin_guard_serializes_with_session_revocation_and_role_changes(
                         "FROM users",
                     )
                     # 先确认 guard 已等待 user，再设定到期时刻；准备阶段不消耗有效窗口。
-                    expiration = now_utc() + timedelta(seconds=2)
+                    expiration = utc_now() + timedelta(seconds=2)
                     await blocking_session.execute(
                         text(
                             "UPDATE auth_sessions SET expires_at = :expires_at "
@@ -1152,10 +1152,10 @@ def test_admin_guard_serializes_with_session_revocation_and_role_changes(
                             "user_id": expiring_user,
                         },
                     )
-                    assert now_utc() < expiration
-                    remaining = (expiration - now_utc()).total_seconds()
+                    assert utc_now() < expiration
+                    remaining = (expiration - utc_now()).total_seconds()
                     await asyncio.sleep(max(0.0, remaining) + 0.1)
-                    assert now_utc() > expiration
+                    assert utc_now() > expiration
             await asyncio.wait_for(expiry_task, timeout=TASK_TIMEOUT)
             assert expiry_result["user"] is None
         finally:

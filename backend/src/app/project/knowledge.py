@@ -8,7 +8,7 @@ from typing import Protocol
 
 from app.access import AccessPolicyService
 from app.project.service import ProjectService
-from common.ids import now_utc
+from common.date import utc_now
 from domain.access import ResourceType, UserAccessSnapshot
 from domain.knowledge.model import KnowledgeBase
 from domain.project import ProjectNotFoundError
@@ -35,7 +35,7 @@ class ProjectKnowledgeService:
         repository: ProjectKnowledgeRepository,
         *,
         access_policy: AccessPolicyService,
-        clock: Callable[[], datetime] = now_utc,
+        clock: Callable[[], datetime] = utc_now,
     ) -> None:
         """保存项目查询用例、关联仓储、统一权限引擎和可替换时钟。"""
         self._projects = projects

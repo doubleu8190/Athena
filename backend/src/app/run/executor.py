@@ -38,8 +38,8 @@ from app.tool.runtime import (
     MCP_TOOL_WATCHDOG_GRACE_SECONDS,
     REQUEST_USER_INPUT_DEFINITION,
 )
-from common.date import as_utc
-from common.ids import new_id, now_utc
+from common.date import as_utc, utc_now
+from common.ids import new_id
 from common.json import utf8_size
 from domain.access import ResourceType
 from domain.file import VISION_IMAGE_MIME_TYPES, PendingSessionFile
@@ -175,7 +175,7 @@ class RunExecutor:
         access_policy: AccessPolicyService | None = None,
         auto_title_timeout_seconds: float = AUTO_TITLE_TIMEOUT_SECONDS,
         id_factory: Callable[[str], str] = new_id,
-        clock: Callable[[], datetime] = now_utc,
+        clock: Callable[[], datetime] = utc_now,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
     ) -> None:
         """保存持久化命令、模型配置、工具运行目录、项目/会话端口、权限引擎和有界执行参数。"""

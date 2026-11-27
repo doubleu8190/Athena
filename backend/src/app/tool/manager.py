@@ -9,7 +9,9 @@ from datetime import datetime
 from typing import Any
 
 from app.access import AccessPolicyService
-from common.ids import new_id, now_utc
+from common.date import utc_now
+from common.ids import new_id
+from common.unset import UNSET
 from domain.access import (
     AccessPermissionDeniedError,
     InvalidVisibilityConfigError,
@@ -37,7 +39,6 @@ from domain.mcp import (
     validate_mcp_secret_placeholders,
 )
 from domain.tool import (
-    TOOL_FIELD_UNSET,
     AdminToolDefinition,
     PublicToolDefinition,
     ToolDefinition,
@@ -160,7 +161,7 @@ class ToolManager:
         *,
         access_policy: AccessPolicyService,
         id_factory: Callable[[str], str] = new_id,
-        clock: Callable[[], datetime] = now_utc,
+        clock: Callable[[], datetime] = utc_now,
     ) -> None:
         """显式注入目录、认证、发现、权限引擎、ID 与时钟依赖。"""
         self._servers = repository
@@ -484,15 +485,13 @@ class ToolManager:
         await self._authorize(actor, admin=True)
         if not tool_id or len(tool_id) > 64 or not patch.has_updates():
             raise ValueError("mcp_tool_policy_invalid")
-        if patch.requires_approval is not TOOL_FIELD_UNSET and (
-            type(patch.requires_approval) is not bool
-        ):
+        if patch.requires_approval is not UNSET and (type(patch.requires_approval) is not bool):
             raise ValueError("mcp_tool_policy_invalid")
-        if patch.display_name is not TOOL_FIELD_UNSET:
+        if patch.display_name is not UNSET:
             validate_tool_display_name(patch.display_name)
-        if patch.approval_summary_template is not TOOL_FIELD_UNSET:
+        if patch.approval_summary_template is not UNSET:
             validate_approval_summary_template(patch.approval_summary_template)
-        if patch.parameter_labels is not TOOL_FIELD_UNSET:
+        if patch.parameter_labels is not UNSET:
             validate_parameter_labels(patch.parameter_labels)
         return await self._servers.update_tool_metadata(actor, tool_id, patch)
 

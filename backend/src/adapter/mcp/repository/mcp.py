@@ -24,7 +24,8 @@ from adapter.mcp.converter.mcp import (
     tool_to_public,
 )
 from adapter.mcp.model import McpServerModel, McpToolModel
-from common.ids import now_utc
+from common.date import utc_now
+from common.unset import UNSET
 from domain.access import ResourceType, UserAccessSnapshot, VisibilityGrant, VisibilityScope
 from domain.auth import AuthContext, UserRole
 from domain.mcp import (
@@ -46,7 +47,6 @@ from domain.mcp import (
     McpTransport,
 )
 from domain.tool import (
-    TOOL_FIELD_UNSET,
     AdminToolDefinition,
     McpToolSource,
     PublicToolDefinition,
@@ -69,7 +69,7 @@ class SqlAlchemyMcpRepository(McpServerRepository, McpToolRuntimeReader):
         session_factory: async_sessionmaker[AsyncSession],
         secret_cipher: McpSecretCipher,
         *,
-        clock: Callable[[], datetime] = now_utc,
+        clock: Callable[[], datetime] = utc_now,
     ) -> None:
         """保存会话工厂、AES-GCM 封装器和可替换时钟。"""
         self._session_factory = session_factory
@@ -428,23 +428,19 @@ class SqlAlchemyMcpRepository(McpServerRepository, McpToolRuntimeReader):
         """复核管理员后原子更新单个工具的审批开关与业务化审批展示元信息。"""
         if not tool_id or len(tool_id) > 64 or not patch.has_updates():
             raise ValueError("mcp_tool_policy_invalid")
-        if patch.requires_approval is not TOOL_FIELD_UNSET and (
-            type(patch.requires_approval) is not bool
-        ):
+        if patch.requires_approval is not UNSET and (type(patch.requires_approval) is not bool):
             raise ValueError("mcp_tool_policy_invalid")
         normalized_display_name = (
-            TOOL_FIELD_UNSET
-            if patch.display_name is TOOL_FIELD_UNSET
-            else validate_tool_display_name(patch.display_name)
+            UNSET if patch.display_name is UNSET else validate_tool_display_name(patch.display_name)
         )
         normalized_template = (
-            TOOL_FIELD_UNSET
-            if patch.approval_summary_template is TOOL_FIELD_UNSET
+            UNSET
+            if patch.approval_summary_template is UNSET
             else validate_approval_summary_template(patch.approval_summary_template)
         )
         normalized_labels = (
-            TOOL_FIELD_UNSET
-            if patch.parameter_labels is TOOL_FIELD_UNSET
+            UNSET
+            if patch.parameter_labels is UNSET
             else validate_parameter_labels(patch.parameter_labels)
         )
         try:
@@ -462,13 +458,13 @@ class SqlAlchemyMcpRepository(McpServerRepository, McpToolRuntimeReader):
                     )
                     if row is None:
                         raise McpServerNotFoundError("mcp_tool_not_found")
-                    if patch.requires_approval is not TOOL_FIELD_UNSET:
+                    if patch.requires_approval is not UNSET:
                         row.requires_approval = patch.requires_approval
-                    if normalized_display_name is not TOOL_FIELD_UNSET:
+                    if normalized_display_name is not UNSET:
                         row.display_name = normalized_display_name
-                    if normalized_template is not TOOL_FIELD_UNSET:
+                    if normalized_template is not UNSET:
                         row.approval_summary_template = normalized_template
-                    if normalized_labels is not TOOL_FIELD_UNSET:
+                    if normalized_labels is not UNSET:
                         row.parameter_labels_json = normalized_labels
                     await session.flush()
                     return tool_to_admin(row)

@@ -1,7 +1,7 @@
 import { act, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { MarkdownContent } from "./MarkdownContent";
+import { MarkdownContent } from "../../shared/ui/MarkdownContent";
 
 afterEach(() => {
   vi.useRealTimers();

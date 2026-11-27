@@ -6,8 +6,7 @@ from collections.abc import Callable
 from datetime import datetime
 
 from app.org.feishu_sync import FeishuOrgSyncService
-from common.date import as_utc
-from common.ids import now_utc
+from common.date import as_utc, utc_now
 from domain.auth import AuthContext, CurrentSessionReader, UserRole, UserStatus
 from domain.org import (
     Department,
@@ -30,7 +29,7 @@ class OrgService:
         auth_reader: CurrentSessionReader,
         *,
         feishu_sync_service: FeishuOrgSyncService | None = None,
-        clock: Callable[[], datetime] = now_utc,
+        clock: Callable[[], datetime] = utc_now,
     ) -> None:
         self._repository = repository
         self._auth_reader = auth_reader

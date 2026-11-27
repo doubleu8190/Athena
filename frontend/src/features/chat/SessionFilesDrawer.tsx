@@ -27,6 +27,7 @@ import {
   Skeleton,
   Tooltip,
 } from "../../shared/ui";
+import { fileExtension } from "../../shared/lib/file";
 import {
   extractionErrorSummary,
   fileErrorMessage,
@@ -35,7 +36,6 @@ import { useSessionFiles } from "../files/hooks";
 import {
   canInlinePreviewFile,
   fileDisplayName,
-  fileExtension,
   isPreviewableImageFile,
   sessionFilePreviewUrl,
   sessionFileToPreviewTarget,

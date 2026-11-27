@@ -1,3 +1,5 @@
+import { fileExtension } from "../../shared/lib/file";
+
 export const SESSION_FILE_MAX_BYTES = 50 * 1024 * 1024;
 export const SESSION_FILE_PAGE_SIZE = 50;
 export const SESSION_FILE_CONTENT_DEFAULT_LIMIT_BYTES = 65_536;
@@ -194,11 +196,6 @@ export function mergeSafeFileMimeType(
     return secondary ?? secondaryNorm;
   }
   return primary ?? secondary ?? null;
-}
-
-export function fileExtension(filename: string): string {
-  const index = filename.lastIndexOf(".");
-  return index >= 0 ? filename.slice(index + 1).trim().toLowerCase() : "";
 }
 
 /**

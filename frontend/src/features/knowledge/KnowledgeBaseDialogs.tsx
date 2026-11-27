@@ -464,7 +464,9 @@ export function NewKnowledgeBaseDialog({
       onClose={close}
       open={open}
       panelClassName={
-        visibilityScope === "department" ? "w-full max-w-2xl" : undefined
+        visibilityScope === "department"
+          ? "w-full max-w-[min(42rem,calc(100vw-1.5rem))]"
+          : undefined
       }
       title="新建知识库"
     >
@@ -844,7 +846,9 @@ export function EditKnowledgeBaseDialog({
       onClose={close}
       open={open}
       panelClassName={
-        visibilityScope === "department" ? "w-full max-w-2xl" : undefined
+        visibilityScope === "department"
+          ? "w-full max-w-[min(42rem,calc(100vw-1.5rem))]"
+          : undefined
       }
       title="编辑知识库"
     >

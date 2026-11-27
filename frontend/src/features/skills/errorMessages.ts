@@ -1,4 +1,5 @@
 import { ApiError } from "../../shared/api/client";
+import { resolveApiErrorMessage } from "../../shared/api/errorMessage";
 
 const SKILL_ERROR_COPY: Record<string, string> = {
   skill_package_invalid: "技能包结构或 ZIP 内容不符合要求。",
@@ -138,28 +139,21 @@ const SKILL_ERROR_COPY: Record<string, string> = {
   idempotency_conflict:
     "同一请求标识已用于不同内容，请重新发起操作。",
   file_storage_unavailable: "技能包存储暂时不可用，请稍后重试。",
-  database_unavailable: "数据服务暂时不可用，请稍后重试。",
-  network_error: "无法连接服务器，请检查网络后重试。",
   http_error: "服务器拒绝了本次技能请求，请稍后重试。",
   invalid_response: "服务器返回了无法识别的技能响应。",
 };
 
-function lookupSkillErrorCopy(code: string): string | undefined {
-  // 严格通过 Object.hasOwn 查表，防止原型属性污染导致异常输出。
-  return Object.hasOwn(SKILL_ERROR_COPY, code)
-    ? SKILL_ERROR_COPY[code]
-    : undefined;
-}
+const SKILL_ERROR_FALLBACK = "技能操作未完成，请稍后重试。";
 
 export function skillErrorMessage(error: unknown): string {
-  if (error instanceof ApiError) {
-    const message =
-      lookupSkillErrorCopy(error.detail) ?? "技能操作未完成，请稍后重试。";
-    return error.memberPath
-      ? `${message}\n包内文件：${error.memberPath}`
-      : message;
+  const message = resolveApiErrorMessage(error, {
+    fallback: SKILL_ERROR_FALLBACK,
+    messages: SKILL_ERROR_COPY,
+  });
+  if (error instanceof ApiError && error.memberPath) {
+    return `${message}\n包内文件：${error.memberPath}`;
   }
-  return "技能操作未完成，请稍后重试。";
+  return message;
 }
 
 export function isSkillRevisionConflict(error: unknown): boolean {

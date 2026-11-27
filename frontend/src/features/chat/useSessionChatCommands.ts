@@ -31,7 +31,7 @@ import {
   type RunStatus,
 } from "./model";
 import { chatKeys } from "./queryKeys";
-import { newRequestId } from "./requestId";
+import { newRequestId } from "../../shared/lib/requestId";
 import { subagentApprovalKey } from "./SubagentHitlPanels";
 
 interface FailedComposerCommand {

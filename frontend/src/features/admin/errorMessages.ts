@@ -1,8 +1,8 @@
 import { ApiError } from "../../shared/api/client";
+import { createApiErrorMessage } from "../../shared/api/errorMessage";
 
 const ADMIN_ERROR_COPY: Record<string, string> = {
   admin_required: "管理员权限已失效，正在重新核验账号。",
-  not_authenticated: "登录状态已失效，请重新登录。",
   llm_model_profile_invalid:
     "模型配置不符合后端约束，请检查地址、API Key 和容量参数。",
   llm_model_profile_conflict:
@@ -64,29 +64,14 @@ const ADMIN_ERROR_COPY: Record<string, string> = {
     "Subagent 配置参数不符合要求，请检查 Slug、长度及预算超时范围。",
   subagent_invalid: "Subagent 请求参数无效，请检查后重试。",
   resource_not_found: "目标资源不存在或已被删除。",
-  network_error: "无法连接服务器，请检查网络后重试。",
   http_error: "服务器拒绝了本次管理请求，请稍后重试。",
-  invalid_response: "服务器返回了无法识别的响应，请稍后重试。",
 };
 
-function lookupAdminErrorCopy(code: string): string | undefined {
-  // 严格通过 Object.hasOwn 查表，防止原型属性污染错误提示。
-  return Object.hasOwn(ADMIN_ERROR_COPY, code)
-    ? ADMIN_ERROR_COPY[code]
-    : undefined;
-}
-
-export function adminErrorMessage(error: unknown): string {
-  if (error instanceof ApiError) {
-    return (
-      lookupAdminErrorCopy(error.detail) ??
-      (error.status === 403
-        ? ADMIN_ERROR_COPY.admin_required
-        : "管理操作未完成，请稍后重试。")
-    );
-  }
-  return "管理操作未完成，请稍后重试。";
-}
+export const adminErrorMessage = createApiErrorMessage(
+  ADMIN_ERROR_COPY,
+  "管理操作未完成，请稍后重试。",
+  { 403: ADMIN_ERROR_COPY.admin_required },
+);
 
 export function isAdminForbidden(error: unknown): boolean {
   return (
@@ -101,14 +86,6 @@ export function isMcpConflict(error: unknown): boolean {
     error instanceof ApiError &&
     error.status === 409 &&
     error.detail === "mcp_conflict"
-  );
-}
-
-export function isSystemPromptConflict(error: unknown): boolean {
-  return (
-    error instanceof ApiError &&
-    error.status === 409 &&
-    error.detail === "system_prompt_version_conflict"
   );
 }
 
@@ -127,4 +104,3 @@ export function isSubagentSlugConflict(error: unknown): boolean {
     error.detail === "subagent_slug_conflict"
   );
 }
-

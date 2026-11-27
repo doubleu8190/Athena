@@ -2666,7 +2666,7 @@ def test_skill_repository_write_transactions_verify_auth_once_without_row_locks(
                     "FOR SHARE" not in sql and "FOR UPDATE" not in sql for sql in auth_join_sqls
                 ), f"{op_name} 身份复核不得申请行锁: {auth_join_sqls}"
 
-            with patch("adapter.auth.repository.transaction_guard.now_utc", return_value=NOW):
+            with patch("adapter.auth.repository.transaction_guard.utc_now", return_value=NOW):
                 # 1) 创建包技能 + add_version
                 await repo.create_skill(
                     skill_id="sk_pkg",

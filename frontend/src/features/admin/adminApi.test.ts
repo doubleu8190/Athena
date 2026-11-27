@@ -305,6 +305,9 @@ describe("管理 API 契约", () => {
       adminErrorMessage(new ApiError(403, "admin_required")),
     ).toContain("权限");
     expect(
+      adminErrorMessage(new ApiError(403, "unknown_forbidden")),
+    ).toBe("管理员权限已失效，正在重新核验账号。");
+    expect(
       adminErrorMessage(new ApiError(409, "mcp_conflict")),
     ).toContain("刷新");
     expect(

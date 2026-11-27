@@ -159,17 +159,17 @@ describe("Modal", () => {
     );
     const inner = screen.getByRole("dialog", { name: "内层弹窗" });
 
-    await user.click(
-      within(outer).getByRole("button", { name: "关闭弹窗" }),
+    // 内层打开时，Radix Dialog 会对外层施加 aria-hidden 与 pointer-events: none 隔离；
+    // 即使程序化触发外层关闭按钮，也不会关闭任一层。
+    expect(outer).toHaveAttribute("aria-hidden", "true");
+    fireEvent.click(
+      within(outer).getByRole("button", { name: "关闭弹窗", hidden: true }),
     );
     expect(inner).toBeInTheDocument();
     expect(outer).toBeInTheDocument();
 
-    fireEvent.mouseDown(outer.parentElement as HTMLElement);
-    expect(inner).toBeInTheDocument();
-    expect(outer).toBeInTheDocument();
-
-    fireEvent.mouseDown(inner.parentElement as HTMLElement);
+    // 点击遮罩/外部区域时仅关闭最顶层的内层弹窗，外层弹窗保持打开。
+    fireEvent.pointerDown(document.body);
     expect(
       screen.queryByRole("dialog", { name: "内层弹窗" }),
     ).not.toBeInTheDocument();
@@ -197,10 +197,10 @@ describe("Modal", () => {
     await waitFor(() => expect(innerClose).toBeDisabled());
 
     await user.keyboard("{Escape}");
-    await user.click(
-      within(outer).getByRole("button", { name: "关闭弹窗" }),
+    fireEvent.click(
+      within(outer).getByRole("button", { name: "关闭弹窗", hidden: true }),
     );
-    fireEvent.mouseDown(outer.parentElement as HTMLElement);
+    fireEvent.pointerDown(document.body);
     expect(inner).toBeInTheDocument();
     expect(outer).toBeInTheDocument();
 
@@ -243,11 +243,12 @@ describe("Modal", () => {
     await user.tab({ shift: true });
     expect(lastControl).toHaveFocus();
     expect(
-      within(outer).getByRole("button", { name: "打开内层弹窗" }),
+      within(outer).getByRole("button", { name: "打开内层弹窗", hidden: true }),
     ).not.toHaveFocus();
   });
 
   it("焦点循环跳过程序化和禁用控件", async () => {
+    const user = userEvent.setup();
     render(
       <Modal onClose={() => undefined} open title="上传文件">
         <button data-autofocus type="button">
@@ -260,6 +261,9 @@ describe("Modal", () => {
         />
         <button tabIndex={-1} type="button">
           程序化按钮
+        </button>
+        <button disabled type="button">
+          直接禁用按钮
         </button>
         <fieldset disabled>
           <button type="button">字段集禁用按钮</button>
@@ -274,6 +278,9 @@ describe("Modal", () => {
     const programmaticButton = screen.getByRole("button", {
       name: "程序化按钮",
     });
+    const disabledButton = screen.getByRole("button", {
+      name: "直接禁用按钮",
+    });
     const fieldsetDisabledButton = screen.getByRole("button", {
       name: "字段集禁用按钮",
     });
@@ -282,10 +289,11 @@ describe("Modal", () => {
     });
     await waitFor(() => expect(lastVisibleControl).toHaveFocus());
 
-    fireEvent.keyDown(lastVisibleControl, { key: "Tab" });
+    await user.tab();
     expect(firstControl).toHaveFocus();
     expect(hiddenInput).not.toHaveFocus();
     expect(programmaticButton).not.toHaveFocus();
+    expect(disabledButton).not.toHaveFocus();
     expect(fieldsetDisabledButton).not.toHaveFocus();
   });
 
@@ -295,18 +303,17 @@ describe("Modal", () => {
 
     function NonLifoModalHarness() {
       const [firstOpen, setFirstOpen] = useState(true);
-      const [secondOpen, setSecondOpen] = useState(true);
+      const [secondOpen, setSecondOpen] = useState(false);
       return (
         <>
-          <button onClick={() => setFirstOpen(false)} type="button">
-            先关弹窗 A
-          </button>
           <Modal
             onClose={() => setFirstOpen(false)}
             open={firstOpen}
             title="弹窗 A"
           >
-            <p>A 内容</p>
+            <button onClick={() => setSecondOpen(true)} type="button">
+              打开弹窗 B
+            </button>
           </Modal>
           <Modal
             onClose={() => setSecondOpen(false)}
@@ -326,9 +333,12 @@ describe("Modal", () => {
 
     try {
       render(<NonLifoModalHarness />);
-      expect(document.body.style.overflow).toBe("hidden");
+      expect(document.body).toHaveAttribute("data-scroll-locked", "1");
 
-      // 先关闭较早挂载的弹窗 A（非 LIFO），弹窗 B 仍打开，body 必须维持 hidden。
+      await user.click(screen.getByRole("button", { name: "打开弹窗 B" }));
+      expect(document.body).toHaveAttribute("data-scroll-locked", "2");
+
+      // 先关闭较早挂载的弹窗 A（非 LIFO），弹窗 B 仍打开，body 必须维持滚动锁定。
       await user.click(
         screen.getByRole("button", { name: "从 B 中关闭 A" }),
       );
@@ -338,13 +348,14 @@ describe("Modal", () => {
       expect(
         screen.getByRole("dialog", { name: "弹窗 B" }),
       ).toBeInTheDocument();
-      expect(document.body.style.overflow).toBe("hidden");
+      expect(document.body).toHaveAttribute("data-scroll-locked", "1");
 
-      // 最后一个活跃弹窗 B 关闭后，才恢复进入弹窗前的原始 overflow（"auto"）。
+      // 最后一个活跃弹窗 B 关闭后，解除滚动锁定并保持原始 overflow（"auto"）。
       await user.click(screen.getByRole("button", { name: "关闭 B" }));
       expect(
         screen.queryByRole("dialog", { name: "弹窗 B" }),
       ).not.toBeInTheDocument();
+      expect(document.body).not.toHaveAttribute("data-scroll-locked");
       expect(document.body.style.overflow).toBe("auto");
     } finally {
       document.body.style.overflow = "";
@@ -407,6 +418,69 @@ describe("Modal", () => {
       screen.queryByRole("dialog", { name: "版本设置" }),
     ).not.toBeInTheDocument();
     await waitFor(() => expect(openButton).toHaveFocus());
+  });
+
+  it("嵌套弹窗在同一 commit 中同时以 open={true} 挂载时，内层始终为栈顶且可经关闭按钮与 Escape 正常关闭", async () => {
+    const user = userEvent.setup();
+
+    function SimultaneousNestedModalHarness() {
+      const [outerOpen, setOuterOpen] = useState(true);
+      const [innerOpen, setInnerOpen] = useState(true);
+      return (
+        <Modal
+          onClose={() => setOuterOpen(false)}
+          open={outerOpen}
+          title="同时挂载外层"
+        >
+          <p>外层正文</p>
+          <Modal
+            onClose={() => setInnerOpen(false)}
+            open={innerOpen}
+            title="同时挂载内层"
+          >
+            <input aria-label="内层聚焦框" data-autofocus />
+          </Modal>
+        </Modal>
+      );
+    }
+
+    // 场景 1：同时以 open={true} 挂载后，通过关闭按钮关闭内层。
+    const firstRender = render(<SimultaneousNestedModalHarness />);
+    const firstInner = screen.getByRole("dialog", { name: "同时挂载内层" });
+    const firstOuter = screen
+      .getByText("同时挂载外层")
+      .closest<HTMLElement>('[role="dialog"]');
+    expect(firstOuter).not.toBeNull();
+    expect(firstInner).toHaveAttribute("aria-modal", "true");
+    expect(firstOuter).not.toHaveAttribute("aria-modal");
+
+    await user.click(
+      within(firstInner).getByRole("button", { name: "关闭弹窗" }),
+    );
+    expect(
+      screen.queryByRole("dialog", { name: "同时挂载内层" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.getByRole("dialog", { name: "同时挂载外层" }),
+    ).toHaveAttribute("aria-modal", "true");
+    firstRender.unmount();
+
+    // 场景 2：同时以 open={true} 挂载后，首帧直接按 Escape 仅关闭内层且不死锁。
+    render(<SimultaneousNestedModalHarness />);
+    const secondInner = screen.getByRole("dialog", { name: "同时挂载内层" });
+    const secondOuter = screen
+      .getByText("同时挂载外层")
+      .closest<HTMLElement>('[role="dialog"]');
+    expect(secondInner).toHaveAttribute("aria-modal", "true");
+    expect(secondOuter).not.toHaveAttribute("aria-modal");
+
+    await user.keyboard("{Escape}");
+    expect(
+      screen.queryByRole("dialog", { name: "同时挂载内层" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.getByRole("dialog", { name: "同时挂载外层" }),
+    ).toHaveAttribute("aria-modal", "true");
   });
 });
 

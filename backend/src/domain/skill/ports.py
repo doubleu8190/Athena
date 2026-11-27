@@ -4,15 +4,14 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from datetime import datetime
-from enum import Enum
-from typing import Final, Literal, Protocol
+from typing import Protocol
 
+from common.unset import UNSET, UnsetType
 from domain.access import UserAccessSnapshot, VisibilityGrantInput
 from domain.auth import AuthContext
 from domain.file import PendingSessionFile
 from domain.skill.model import (
     DependencyCheck,
-    RunSkillSnapshot,
     Skill,
     SkillExecutionRecord,
     SkillExecutionStart,
@@ -24,16 +23,6 @@ from domain.skill.model import (
     SkillVersion,
     SkillVersionPage,
 )
-
-
-class _Unset(Enum):
-    """区分 PATCH 未传字段（保持原值）与显式传入 None（清空可空字段）的哨兵枚举。"""
-
-    TOKEN = "UNSET"
-
-
-UNSET: Final = _Unset.TOKEN
-type UnsetType = Literal[_Unset.TOKEN]
 
 
 class SkillRepository(Protocol):
@@ -277,30 +266,6 @@ class SkillRepository(Protocol):
         """管理员按工具调用记录读取排查信息。"""
 
 
-def snapshot_from_skill(skill: Skill, version: SkillVersion) -> RunSkillSnapshot:
-    """构造只含单个选中项的快照辅助函数，供测试和调用方复用。"""
-    from domain.skill.model import RunSkillEntry
-
-    return RunSkillSnapshot(
-        skills=(
-            RunSkillEntry(
-                skill_id=skill.id,
-                slug=skill.slug,
-                name=skill.name,
-                description=skill.description,
-                version_id=version.id,
-                version_label=version.label,
-                requires_approval=skill.script_requires_approval,
-                scope=skill.scope,
-            ),
-        ),
-        selected_skill_ids=(skill.id,),
-    )
-
-
 __all__ = [
-    "UNSET",
     "SkillRepository",
-    "UnsetType",
-    "snapshot_from_skill",
 ]

@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 
 import { formatDateTime } from "../../shared/lib/format";
+import { parsePage } from "../../shared/lib/pagination";
 import { VisibilityBadge } from "../../shared/ui";
 import { EmptyState } from "../../shared/ui/EmptyState";
 import { ErrorBanner } from "../../shared/ui/ErrorBanner";
@@ -21,14 +22,6 @@ import { adminErrorMessage } from "./errorMessages";
 import { useMcpServers } from "./hooks";
 
 const PAGE_SIZE = 10;
-
-function parsePage(value: string | null): number {
-  if (!value) {
-    return 1;
-  }
-  const parsed = Number(value);
-  return Number.isInteger(parsed) && parsed > 0 ? parsed : 1;
-}
 
 export function AdminMcpPage() {
   const [searchParams, setSearchParams] = useSearchParams();

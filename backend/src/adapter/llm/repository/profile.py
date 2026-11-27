@@ -19,14 +19,15 @@ from adapter.llm.model.profile import (
     ModelProfileVersionModel,
 )
 from adapter.subagent.model import SubagentModel
-from common.ids import new_id, now_utc
+from common.date import utc_now
+from common.ids import new_id
+from common.unset import UNSET
 from domain.auth import AuthContext, UserRole
 from domain.llm.model.compression_policy import (
     CompressionPolicyInput,
     CompressionPolicyVersion,
 )
 from domain.llm.model.profile import (
-    MODEL_PROFILE_UNSET,
     ModelProfileInput,
     ModelProfileUpdateInput,
     ModelProfileVersion,
@@ -53,7 +54,7 @@ class SqlAlchemyModelProfileRepository(ModelProfileRepository, CompressionPolicy
         session_factory: async_sessionmaker[AsyncSession],
         secret_cipher: McpSecretCipher | None,
         *,
-        clock: Callable[[], datetime] = now_utc,
+        clock: Callable[[], datetime] = utc_now,
     ) -> None:
         """保存数据库会话工厂和可替换时钟。"""
         self._session_factory = session_factory
@@ -245,82 +246,76 @@ class SqlAlchemyModelProfileRepository(ModelProfileRepository, CompressionPolicy
 
                 # 将局部补丁与锁内当前行合并，统一复核所有领域不变量（含输出窗口 < 上下文窗口）。
                 merged = validate_model_profile_fields(
-                    name=row.name if patch.name is MODEL_PROFILE_UNSET else patch.name,
-                    base_url=(
-                        row.base_url if patch.base_url is MODEL_PROFILE_UNSET else patch.base_url
-                    ),
-                    model=row.model if patch.model is MODEL_PROFILE_UNSET else patch.model,
+                    name=row.name if patch.name is UNSET else patch.name,
+                    base_url=row.base_url if patch.base_url is UNSET else patch.base_url,
+                    model=row.model if patch.model is UNSET else patch.model,
                     context_window_tokens=(
                         row.context_window_tokens
-                        if patch.context_window_tokens is MODEL_PROFILE_UNSET
+                        if patch.context_window_tokens is UNSET
                         else patch.context_window_tokens
                     ),
                     tokenizer_encoding=(
                         row.tokenizer_encoding
-                        if patch.tokenizer_encoding is MODEL_PROFILE_UNSET
+                        if patch.tokenizer_encoding is UNSET
                         else patch.tokenizer_encoding
                     ),
                     supports_stream=(
                         bool(row.supports_stream)
-                        if patch.supports_stream is MODEL_PROFILE_UNSET
+                        if patch.supports_stream is UNSET
                         else patch.supports_stream
                     ),
                     supports_tools=(
                         bool(row.supports_tools)
-                        if patch.supports_tools is MODEL_PROFILE_UNSET
+                        if patch.supports_tools is UNSET
                         else patch.supports_tools
                     ),
                     supports_parallel_tool_calls=(
                         bool(row.supports_parallel_tool_calls)
-                        if patch.supports_parallel_tool_calls is MODEL_PROFILE_UNSET
+                        if patch.supports_parallel_tool_calls is UNSET
                         else patch.supports_parallel_tool_calls
                     ),
                     max_output_tokens=(
                         row.max_output_tokens
-                        if patch.max_output_tokens is MODEL_PROFILE_UNSET
+                        if patch.max_output_tokens is UNSET
                         else patch.max_output_tokens
                     ),
                     request_timeout_seconds=(
                         row.request_timeout_seconds
-                        if patch.request_timeout_seconds is MODEL_PROFILE_UNSET
+                        if patch.request_timeout_seconds is UNSET
                         else patch.request_timeout_seconds
                     ),
                     execution_timeout_seconds=(
                         row.execution_timeout_seconds
-                        if patch.execution_timeout_seconds is MODEL_PROFILE_UNSET
+                        if patch.execution_timeout_seconds is UNSET
                         else patch.execution_timeout_seconds
                     ),
                     max_concurrency=(
                         row.max_concurrency
-                        if patch.max_concurrency is MODEL_PROFILE_UNSET
+                        if patch.max_concurrency is UNSET
                         else patch.max_concurrency
                     ),
                     temperature=(
-                        row.temperature
-                        if patch.temperature is MODEL_PROFILE_UNSET
-                        else patch.temperature
+                        row.temperature if patch.temperature is UNSET else patch.temperature
                     ),
-                    enabled=(
-                        bool(row.enabled) if patch.enabled is MODEL_PROFILE_UNSET else patch.enabled
-                    ),
+                    enabled=bool(row.enabled) if patch.enabled is UNSET else patch.enabled,
                     visible_to_users=(
                         bool(row.visible_to_users)
-                        if patch.visible_to_users is MODEL_PROFILE_UNSET
+                        if patch.visible_to_users is UNSET
                         else patch.visible_to_users
                     ),
                     scenario_label=(
                         row.scenario_label
-                        if patch.scenario_label is MODEL_PROFILE_UNSET
+                        if patch.scenario_label is UNSET
                         else patch.scenario_label
                     ),
                     scenario_description=(
                         row.scenario_description
-                        if patch.scenario_description is MODEL_PROFILE_UNSET
+                        if patch.scenario_description is UNSET
                         else patch.scenario_description
                     ),
                     supports_vision=(
                         bool(row.supports_vision)
-                        if patch.supports_vision is MODEL_PROFILE_UNSET
+                        if patch.supports_vision is UNSET
                         else patch.supports_vision
                     ),
                     require_output_strictly_less_than_context=True,
@@ -359,7 +354,7 @@ class SqlAlchemyModelProfileRepository(ModelProfileRepository, CompressionPolicy
 
                 # 密钥保留边界：未传 api_key 或显式传 None 时严禁改动原加密凭据；
                 # 仅当传入非空字符串时重新校验并加密替换。
-                if patch.api_key is not MODEL_PROFILE_UNSET and patch.api_key is not None:
+                if patch.api_key is not UNSET and patch.api_key is not None:
                     validate_model_profile_api_key(patch.api_key)
                     if self._secret_cipher is None:
                         raise ModelProfileError("llm_secret_key_missing")

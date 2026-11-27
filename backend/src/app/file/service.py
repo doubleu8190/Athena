@@ -20,7 +20,8 @@ from pathlib import Path, PurePosixPath
 from typing import Literal, NoReturn
 
 from common.async_utils import run_thread_shielded
-from common.ids import new_id, now_utc
+from common.date import utc_now
+from common.ids import new_id
 from domain.file import (
     EXTRACTABLE_DOCUMENT_EXTENSIONS,
     MAX_SESSION_DOCUMENT_EXTRACT_BYTES,
@@ -275,7 +276,7 @@ class SessionFileService:
         document_extractor: SessionDocumentExtractor | None = None,
         image_normalizer: VisionImageNormalizer | None = None,
         id_factory: Callable[[str], str] = new_id,
-        clock: Callable[[], datetime] = now_utc,
+        clock: Callable[[], datetime] = utc_now,
     ) -> None:
         """保存文件元数据仓储、对象存储、可选文档提取器、图片归一化器和业务标识生成器。"""
         self._repository = repository

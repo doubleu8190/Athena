@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from datetime import datetime
 
-from common.ids import now_utc
+from common.date import utc_now
 from domain.auth import AuthContext, CurrentSessionReader, UserRole
 from domain.system_prompt import (
     MAX_SYSTEM_PROMPT_CONTENT_CHARACTERS,
@@ -30,7 +30,7 @@ class SystemPromptService:
         repository: SystemPromptRepository,
         auth_reader: CurrentSessionReader,
         *,
-        clock: Callable[[], datetime] = now_utc,
+        clock: Callable[[], datetime] = utc_now,
     ) -> None:
         """保存持久化端口、当前会话读取能力和业务时钟。"""
         self._repository = repository

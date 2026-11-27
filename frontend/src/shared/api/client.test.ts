@@ -14,7 +14,6 @@ import {
   apiMultipart,
   apiPatch,
   apiPost,
-  apiRequest,
   stripApiPrefix,
 } from "./client";
 
@@ -65,7 +64,7 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-describe("apiRequest 与 OpenAPI 客户端", () => {
+describe("OpenAPI 客户端与底层请求管道", () => {
   it("把 401 转成 ApiError 并发布应用级未认证事件", async () => {
     const listener = vi.fn();
     window.addEventListener(AUTH_UNAUTHORIZED_EVENT, listener);
@@ -300,9 +299,10 @@ describe("apiRequest 与 OpenAPI 客户端", () => {
       ),
     );
 
-    const error = await apiRequest("/admin/skills/import").catch(
-      (reason: unknown) => reason,
-    );
+    const error = await apiMultipart(
+      "/admin/skills/import",
+      new FormData(),
+    ).catch((reason: unknown) => reason);
 
     expect(error).toBeInstanceOf(ApiError);
     expect(error).toMatchObject({
@@ -324,7 +324,7 @@ describe("apiRequest 与 OpenAPI 客户端", () => {
     );
 
     await expect(
-      apiRequest("/admin/skills/import"),
+      apiMultipart("/admin/skills/import", new FormData()),
     ).rejects.toMatchObject({
       detail: "skill_package_invalid",
       memberPath: undefined,
@@ -392,7 +392,9 @@ describe("apiRequest 与 OpenAPI 客户端", () => {
       ),
     );
 
-    await expect(apiRequest("/admin/models")).rejects.toMatchObject({
+    await expect(
+      apiMultipart("/admin/skills/import", new FormData()),
+    ).rejects.toMatchObject({
       detail: "admin_required",
       status: 403,
     });
@@ -401,7 +403,7 @@ describe("apiRequest 与 OpenAPI 客户端", () => {
     const event = adminListener.mock.calls[0]?.[0];
     expect(event).toBeInstanceOf(CustomEvent);
     expect((event as CustomEvent<{ path: string }>).detail).toEqual({
-      path: "/admin/models",
+      path: "/admin/skills/import",
     });
     expect(authListener).not.toHaveBeenCalled();
     window.removeEventListener(ADMIN_FORBIDDEN_EVENT, adminListener);
@@ -469,7 +471,7 @@ describe("apiRequest 与 OpenAPI 客户端", () => {
     window.removeEventListener(ADMIN_FORBIDDEN_EVENT, adminListener);
   });
 
-  it("身份在成功 JSON 响应体读取期间切换时丢弃旧数据", async () => {
+  it("身份在 OpenAPI POST 成功 JSON 响应体读取期间切换时丢弃旧数据", async () => {
     const delayed = deferredBodyResponse(
       JSON.stringify({ id: "private-project-a" }),
     );
@@ -478,7 +480,9 @@ describe("apiRequest 与 OpenAPI 客户端", () => {
       vi.fn().mockResolvedValue(delayed.response),
     );
 
-    const request = apiRequest<{ id: string }>("/projects/private");
+    const request = apiPost("/api/v1/projects", {
+      body: { name: "private-project-a" },
+    });
     await flushTasks();
     expect(delayed.response.bodyUsed).toBe(true);
 
@@ -514,7 +518,7 @@ describe("apiRequest 与 OpenAPI 客户端", () => {
     });
   });
 
-  it("身份在错误 JSON 读取期间切换时不发布旧 403 管理事件", async () => {
+  it("身份在 multipart 错误 JSON 读取期间切换时不发布旧 403 管理事件", async () => {
     const adminListener = vi.fn();
     window.addEventListener(ADMIN_FORBIDDEN_EVENT, adminListener);
     const delayed = deferredBodyResponse(
@@ -526,7 +530,7 @@ describe("apiRequest 与 OpenAPI 客户端", () => {
       vi.fn().mockResolvedValue(delayed.response),
     );
 
-    const request = apiRequest("/admin/tools");
+    const request = apiMultipart("/admin/skills/import", new FormData());
     await flushTasks();
     expect(delayed.response.bodyUsed).toBe(true);
 
@@ -540,7 +544,7 @@ describe("apiRequest 与 OpenAPI 客户端", () => {
     window.removeEventListener(ADMIN_FORBIDDEN_EVENT, adminListener);
   });
 
-  it("身份在错误 JSON 读取期间切换时不发布旧 401 事件", async () => {
+  it("身份在 multipart 错误 JSON 读取期间切换时不发布旧 401 事件", async () => {
     const authListener = vi.fn();
     window.addEventListener(AUTH_UNAUTHORIZED_EVENT, authListener);
     const delayed = deferredBodyResponse(
@@ -552,7 +556,10 @@ describe("apiRequest 与 OpenAPI 客户端", () => {
       vi.fn().mockResolvedValue(delayed.response),
     );
 
-    const request = apiRequest("/projects");
+    const request = apiMultipart(
+      "/knowledge-bases/a/documents/upload",
+      new FormData(),
+    );
     await flushTasks();
     expect(delayed.response.bodyUsed).toBe(true);
 

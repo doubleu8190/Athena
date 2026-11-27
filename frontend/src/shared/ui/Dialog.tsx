@@ -35,8 +35,8 @@ const dialogSizeClasses: Record<DialogSize, string> = {
 
 export interface DialogContentProps
   extends React.ComponentPropsWithoutRef<typeof DialogPrimitive.Content> {
-  /** 弹窗宽度档位：sm(420px) / md(540px) / lg(680px)。 */
-  size?: DialogSize;
+  /** 弹窗宽度档位：sm(420px) / md(540px) / lg(680px)，none 表示交由业务样式类控制宽度。 */
+  size?: DialogSize | "none";
   /** 禁用关闭交互（提交中场景）：拦截 Escape、外部点击并禁用右上角关闭按钮。 */
   closeDisabled?: boolean;
   /** 隐藏默认右上角关闭按钮。 */
@@ -66,10 +66,12 @@ export const DialogContent = React.forwardRef<
       <DialogPrimitive.Content
         ref={ref}
         className={cn(
-          "fixed top-1/2 left-1/2 z-[var(--z-dialog)] flex max-h-[calc(100vh-2rem)] w-[calc(100vw-2rem)] -translate-x-1/2 -translate-y-1/2 flex-col",
+          "fixed top-1/2 left-1/2 z-[var(--z-dialog)] flex max-h-[calc(100vh-2rem)] -translate-x-1/2 -translate-y-1/2 flex-col",
           "rounded-xl border border-border-default bg-canvas text-text-primary shadow-md",
           "focus-visible:outline-hidden",
-          dialogSizeClasses[size],
+          size === "none"
+            ? "max-w-[calc(100vw-1.5rem)]"
+            : ["w-[calc(100vw-2rem)]", dialogSizeClasses[size]],
           className,
         )}
         onEscapeKeyDown={(event) => {

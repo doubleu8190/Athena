@@ -11,11 +11,11 @@ from collections.abc import Callable, Sequence
 from dataclasses import replace
 from datetime import datetime
 from pathlib import PurePath
-from typing import Final
 
 from app.access import AccessPolicyService
-from common.date import as_utc
-from common.ids import new_id, now_utc
+from common.date import as_utc, utc_now
+from common.ids import new_id
+from common.unset import UNSET, UnsetType
 from domain.access import (
     AccessPermissionDeniedError,
     InvalidVisibilityConfigError,
@@ -75,15 +75,6 @@ class KnowledgeSearchUnavailableError(RuntimeError):
     """关键词与语义检索通道均不可用。"""
 
 
-class KnowledgeUnsetType:
-    """区分 PATCH 更新中未传递字段与显式传 None 的哨兵类型。"""
-
-    __slots__ = ()
-
-
-KNOWLEDGE_UNSET: Final[KnowledgeUnsetType] = KnowledgeUnsetType()
-
-
 def _kb_access_target(base: KnowledgeBase) -> ResourceAccessTarget:
     """构造知识库的统一权限引擎判定目标。"""
     return ResourceAccessTarget(
@@ -110,7 +101,7 @@ class KnowledgeService:
         access_policy: AccessPolicyService,
         semantic_min_score: float = DEFAULT_SEMANTIC_MIN_SCORE,
         id_factory: Callable[[str], str] = new_id,
-        clock: Callable[[], datetime] = now_utc,
+        clock: Callable[[], datetime] = utc_now,
     ) -> None:
         """保存持久化、分词、权限引擎及可替换的模型档案、ID 和时钟来源。"""
         _required(profile_id, "profile_id_required")
@@ -236,17 +227,15 @@ class KnowledgeService:
         name: str | None,
         description: str | None,
         *,
-        visibility_scope: VisibilityScope | KnowledgeUnsetType = KNOWLEDGE_UNSET,
-        owner_department_id: str | None | KnowledgeUnsetType = KNOWLEDGE_UNSET,
-        visibility_grants: (
-            Sequence[VisibilityGrantInput] | None | KnowledgeUnsetType
-        ) = KNOWLEDGE_UNSET,
+        visibility_scope: VisibilityScope | UnsetType = UNSET,
+        owner_department_id: str | None | UnsetType = UNSET,
+        visibility_grants: Sequence[VisibilityGrantInput] | None | UnsetType = UNSET,
     ) -> KnowledgeBase:
         """修改知识库名称、说明或可见性配置（不可读返回 404，无管理权返回 403）。"""
         has_visibility_patch = (
-            not isinstance(visibility_scope, KnowledgeUnsetType)
-            or not isinstance(owner_department_id, KnowledgeUnsetType)
-            or not isinstance(visibility_grants, KnowledgeUnsetType)
+            visibility_scope is not UNSET
+            or owner_department_id is not UNSET
+            or visibility_grants is not UNSET
         )
         if name is None and description is None and not has_visibility_patch:
             raise KnowledgeInputError("knowledge_base_patch_empty")
@@ -275,21 +264,15 @@ class KnowledgeService:
                 raise KnowledgeNotFoundError("knowledge_base_not_found")
             return updated
 
-        target_scope = (
-            current.visibility_scope
-            if isinstance(visibility_scope, KnowledgeUnsetType)
-            else visibility_scope
-        )
-        if isinstance(owner_department_id, KnowledgeUnsetType):
+        target_scope = current.visibility_scope if visibility_scope is UNSET else visibility_scope
+        if owner_department_id is UNSET:
             # 切换为 company/personal 且未显式传 owner_department_id 时自动清空归属部门。
             target_dept = (
                 current.owner_department_id if target_scope is VisibilityScope.DEPARTMENT else None
             )
         else:
             target_dept = owner_department_id
-        explicit_grants = (
-            None if isinstance(visibility_grants, KnowledgeUnsetType) else visibility_grants
-        )
+        explicit_grants = None if visibility_grants is UNSET else visibility_grants
         try:
             (
                 resolved_scope,
@@ -303,10 +286,7 @@ class KnowledgeService:
                 visibility_grants=explicit_grants,
                 for_create=False,
                 existing_target=_kb_access_target(current),
-                preserve_existing_grants_when_none=isinstance(
-                    visibility_grants,
-                    KnowledgeUnsetType,
-                ),
+                preserve_existing_grants_when_none=visibility_grants is UNSET,
             )
         except AccessPermissionDeniedError as error:
             raise KnowledgePermissionDeniedError(error.code) from error

@@ -32,7 +32,9 @@ from app.skill.personal import (
     validate_version_label,
 )
 from common.async_utils import run_thread_shielded
-from common.ids import new_id, now_utc
+from common.date import utc_now
+from common.ids import new_id
+from common.unset import UNSET, UnsetType
 from domain.access import (
     AccessPermissionDeniedError,
     InvalidVisibilityConfigError,
@@ -45,7 +47,6 @@ from domain.auth import AuthContext, CurrentSessionReader, User, UserRole
 from domain.file import FileObjectStore, FileStorageError
 from domain.skill import (
     MAX_PACKAGE_ZIP_BYTES,
-    UNSET,
     ActiveSkillGuide,
     DependencyCheck,
     DependencyCheckStatus,
@@ -66,7 +67,6 @@ from domain.skill import (
     SkillScriptDefinition,
     SkillVersion,
     SkillVersionPage,
-    UnsetType,
 )
 
 
@@ -112,7 +112,7 @@ class SkillService:
         dependency_checker: DependencyChecker | None = None,
         package_cache: SkillPackageCache | None = None,
         id_factory: Callable[[str], str] = new_id,
-        clock: Callable[[], datetime] = now_utc,
+        clock: Callable[[], datetime] = utc_now,
     ) -> None:
         """保存持久化、可选对象存储（仅 ZIP/日志需要）、认证、权限引擎与依赖检查器。"""
         self._repository = repository

@@ -14,12 +14,6 @@ class LlmError(Exception):
         super().__init__(self.code)
 
 
-class LlmConfigurationError(LlmError):
-    """部署配置无效。"""
-
-    code = "llm_configuration_invalid"
-
-
 class LlmCapabilityError(LlmError):
     """Profile 未声明请求所需能力。"""
 
@@ -70,9 +64,3 @@ class LlmIncompleteError(LlmError):
     """模型未正常完成响应。"""
 
     code = "llm_incomplete"
-
-
-class LlmToolArgumentsError(LlmError):
-    """模型生成的工具参数未通过 JSON Schema 校验。"""
-
-    code = "llm_tool_arguments_invalid"

@@ -27,6 +27,7 @@ import { newChatHref } from "../features/chat/draft";
 import { NewProjectDialog } from "../features/projects/ProjectNameDialogs";
 import { useSession } from "../features/sessions/hooks";
 import type { Session } from "../features/sessions/model";
+import { useIsDesktopViewport } from "../shared/lib/viewport";
 import {
   Brand,
   InlineAlert,
@@ -45,10 +46,10 @@ import {
 import { SidebarSessionList } from "./shell/SidebarSessionList";
 import { SidebarWorkspaceNav } from "./shell/SidebarWorkspaceNav";
 import {
+  DESKTOP_BREAKPOINT_PX,
   activeSessionIdFromPath,
   getAdminNavigationSection,
   readSidebarCollapsed,
-  useIsDesktopViewport,
   writeSidebarCollapsed,
 } from "./shell/navigation";
 
@@ -92,7 +93,10 @@ function AppShellLayout() {
   const navigate = useNavigate();
   const { projectId: draftProjectId } = useDraftChat();
 
-  const isDesktop = useIsDesktopViewport();
+  const isDesktop = useIsDesktopViewport({
+    breakpointPx: DESKTOP_BREAKPOINT_PX,
+    strategy: "innerWidth",
+  });
   const [sidebarCollapsed, setSidebarCollapsed] = useState(readSidebarCollapsed);
   const [mobileDrawerOpen, setMobileDrawerOpen] = useState(false);
   const [logoutError, setLogoutError] = useState<string | null>(null);

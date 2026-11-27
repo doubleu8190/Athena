@@ -24,8 +24,9 @@ from api.dto.tool import (
 from api.mcp_errors import SafeMcpRoute, mcp_error_to_http
 from api.security import AdminAuth, CurrentAuth
 from app.tool import ToolManager
+from common.unset import UNSET
 from domain.mcp import McpServerNotFoundError
-from domain.tool import TOOL_FIELD_UNSET, ToolMetadataPatch
+from domain.tool import ToolMetadataPatch
 
 
 def _ensure_pagination_query(request: Request) -> None:
@@ -155,22 +156,18 @@ def build_tools_router(manager: ToolManager) -> APIRouter:
             # 统一走局部元信息更新通道，避免仅改审批开关时的冗余路由分叉。
             patch = ToolMetadataPatch(
                 requires_approval=(
-                    TOOL_FIELD_UNSET
+                    UNSET
                     if "requires_approval" not in fields_set
                     else cast(bool, request.requires_approval)
                 ),
-                display_name=(
-                    TOOL_FIELD_UNSET if "display_name" not in fields_set else request.display_name
-                ),
+                display_name=(UNSET if "display_name" not in fields_set else request.display_name),
                 approval_summary_template=(
-                    TOOL_FIELD_UNSET
+                    UNSET
                     if "approval_summary_template" not in fields_set
                     else request.approval_summary_template
                 ),
                 parameter_labels=(
-                    TOOL_FIELD_UNSET
-                    if "parameter_labels" not in fields_set
-                    else request.parameter_labels
+                    UNSET if "parameter_labels" not in fields_set else request.parameter_labels
                 ),
             )
             result = await manager.update_tool_metadata(actor, tool_id, patch)

@@ -7,10 +7,10 @@ import math
 import unicodedata
 from dataclasses import dataclass, field
 from datetime import datetime
-from enum import Enum
 from typing import Literal
 from urllib.parse import urlsplit
 
+from common.unset import UNSET, UnsetType
 from domain.llm.model.profile_errors import ModelProfileError
 from domain.mcp import MAX_MCP_SECRET_BYTES
 
@@ -19,16 +19,6 @@ MAX_CONTEXT_WINDOW_TOKENS = 1_048_576
 MAX_OUTPUT_TOKENS = 1_000_000
 MAX_SCENARIO_LABEL_LENGTH = 64
 MAX_SCENARIO_DESCRIPTION_LENGTH = 255
-
-
-class _ModelProfileUnset(Enum):
-    """局部更新中用于区分“未传字段”与显式传入 None 的哨兵枚举。"""
-
-    UNSET = "UNSET"
-
-
-type ModelProfileUnsetType = Literal[_ModelProfileUnset.UNSET]
-MODEL_PROFILE_UNSET: ModelProfileUnsetType = _ModelProfileUnset.UNSET
 
 
 @dataclass(frozen=True, slots=True)
@@ -97,32 +87,30 @@ class ModelProfileUpdateInput:
     """管理员提交的模型配置局部更新补丁；api_key 为 UNSET 或 None 时严格保留原密文。"""
 
     expected_version: int | None = None
-    name: str | ModelProfileUnsetType = MODEL_PROFILE_UNSET
-    base_url: str | ModelProfileUnsetType = MODEL_PROFILE_UNSET
-    model: str | ModelProfileUnsetType = MODEL_PROFILE_UNSET
-    api_key: str | None | ModelProfileUnsetType = field(default=MODEL_PROFILE_UNSET, repr=False)
-    context_window_tokens: int | ModelProfileUnsetType = MODEL_PROFILE_UNSET
-    tokenizer_encoding: Literal["cl100k_base", "o200k_base"] | ModelProfileUnsetType = (
-        MODEL_PROFILE_UNSET
-    )
-    supports_stream: bool | ModelProfileUnsetType = MODEL_PROFILE_UNSET
-    supports_tools: bool | ModelProfileUnsetType = MODEL_PROFILE_UNSET
-    supports_parallel_tool_calls: bool | ModelProfileUnsetType = MODEL_PROFILE_UNSET
-    max_output_tokens: int | ModelProfileUnsetType = MODEL_PROFILE_UNSET
-    request_timeout_seconds: int | ModelProfileUnsetType = MODEL_PROFILE_UNSET
-    execution_timeout_seconds: int | ModelProfileUnsetType = MODEL_PROFILE_UNSET
-    max_concurrency: int | ModelProfileUnsetType = MODEL_PROFILE_UNSET
-    temperature: float | None | ModelProfileUnsetType = MODEL_PROFILE_UNSET
-    enabled: bool | ModelProfileUnsetType = MODEL_PROFILE_UNSET
-    visible_to_users: bool | ModelProfileUnsetType = MODEL_PROFILE_UNSET
-    scenario_label: str | None | ModelProfileUnsetType = MODEL_PROFILE_UNSET
-    scenario_description: str | None | ModelProfileUnsetType = MODEL_PROFILE_UNSET
-    supports_vision: bool | ModelProfileUnsetType = MODEL_PROFILE_UNSET
+    name: str | UnsetType = UNSET
+    base_url: str | UnsetType = UNSET
+    model: str | UnsetType = UNSET
+    api_key: str | None | UnsetType = field(default=UNSET, repr=False)
+    context_window_tokens: int | UnsetType = UNSET
+    tokenizer_encoding: Literal["cl100k_base", "o200k_base"] | UnsetType = UNSET
+    supports_stream: bool | UnsetType = UNSET
+    supports_tools: bool | UnsetType = UNSET
+    supports_parallel_tool_calls: bool | UnsetType = UNSET
+    max_output_tokens: int | UnsetType = UNSET
+    request_timeout_seconds: int | UnsetType = UNSET
+    execution_timeout_seconds: int | UnsetType = UNSET
+    max_concurrency: int | UnsetType = UNSET
+    temperature: float | None | UnsetType = UNSET
+    enabled: bool | UnsetType = UNSET
+    visible_to_users: bool | UnsetType = UNSET
+    scenario_label: str | None | UnsetType = UNSET
+    scenario_description: str | None | UnsetType = UNSET
+    supports_vision: bool | UnsetType = UNSET
 
     def has_updates(self) -> bool:
         """判断是否至少包含一个非 expected_version 的显式更新字段。"""
         return any(
-            value is not MODEL_PROFILE_UNSET
+            value is not UNSET
             for value in (
                 self.name,
                 self.base_url,
@@ -324,7 +312,6 @@ __all__ = [
     "MAX_OUTPUT_TOKENS",
     "MAX_SCENARIO_DESCRIPTION_LENGTH",
     "MAX_SCENARIO_LABEL_LENGTH",
-    "MODEL_PROFILE_UNSET",
     "ModelProfileInput",
     "ModelProfileUpdateInput",
     "ModelProfileVersion",

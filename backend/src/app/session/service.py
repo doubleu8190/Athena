@@ -8,8 +8,8 @@ from datetime import datetime
 
 from app.session.converter.result import session_page_to_result, session_to_result
 from app.session.model.result import SessionPageResult, SessionResult
-from common.date import as_utc
-from common.ids import new_id, now_utc
+from common.date import as_utc, utc_now
+from common.ids import new_id
 from domain.project import ProjectNotFoundError
 from domain.session import (
     InvalidSessionFilterError,
@@ -93,7 +93,7 @@ class SessionService:
         repository: SessionRepository,
         *,
         id_factory: Callable[[], str] = _default_id_factory,
-        clock: Callable[[], datetime] = now_utc,
+        clock: Callable[[], datetime] = utc_now,
     ) -> None:
         """保存仓储及可替换的 ID、时钟来源。"""
         self._repository = repository

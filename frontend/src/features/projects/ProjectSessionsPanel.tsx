@@ -39,6 +39,7 @@ import {
   Skeleton,
   toast,
 } from "../../shared/ui";
+import { parsePage } from "../../shared/lib/pagination";
 import { newChatHref } from "../chat/draft";
 import { sessionErrorMessage } from "../sessions/errorMessages";
 import {
@@ -56,14 +57,6 @@ import type { Project } from "./model";
 
 const PAGE_SIZE = 10;
 const SEARCH_DEBOUNCE_MS = 250;
-
-function parsePage(value: string | null): number {
-  if (!value) {
-    return 1;
-  }
-  const parsed = Number(value);
-  return Number.isInteger(parsed) && parsed > 0 ? parsed : 1;
-}
 
 interface RenameSessionRadixDialogProps {
   onClose: () => void;

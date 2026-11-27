@@ -43,14 +43,13 @@ from api.dto.knowledge import (
 )
 from api.security import CurrentAuth
 from app.knowledge.service import (
-    KNOWLEDGE_UNSET,
     KnowledgeInputError,
     KnowledgeNotFoundError,
     KnowledgePermissionDeniedError,
     KnowledgeSearchUnavailableError,
     KnowledgeService,
-    KnowledgeUnsetType,
 )
+from common.unset import UNSET, UnsetType
 from domain.access import VisibilityGrantInput, VisibilityScope
 from domain.knowledge.model import (
     OriginalStorageError,
@@ -131,22 +130,22 @@ def build_knowledge_router(
         try:
             if "visibility_scope" in fields and request.visibility_scope is None:
                 raise KnowledgeInputError("visibility_scope_invalid")
-            visibility_scope_arg: VisibilityScope | KnowledgeUnsetType = (
+            visibility_scope_arg: VisibilityScope | UnsetType = (
                 VisibilityScope(request.visibility_scope)
                 if "visibility_scope" in fields and request.visibility_scope is not None
-                else KNOWLEDGE_UNSET
+                else UNSET
             )
-            owner_department_arg: str | None | KnowledgeUnsetType = (
-                request.owner_department_id if "owner_department_id" in fields else KNOWLEDGE_UNSET
+            owner_department_arg: str | None | UnsetType = (
+                request.owner_department_id if "owner_department_id" in fields else UNSET
             )
-            visibility_grants_arg: tuple[VisibilityGrantInput, ...] | None | KnowledgeUnsetType = (
+            visibility_grants_arg: tuple[VisibilityGrantInput, ...] | None | UnsetType = (
                 (
                     None
                     if request.visibility_grants is None
                     else tuple(item.to_domain() for item in request.visibility_grants)
                 )
                 if "visibility_grants" in fields
-                else KNOWLEDGE_UNSET
+                else UNSET
             )
             updated = await service.rename_base(
                 auth.user.id,

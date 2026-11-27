@@ -6,7 +6,8 @@ from collections.abc import Callable
 from dataclasses import replace
 from datetime import datetime
 
-from common.ids import now_utc
+from common.date import utc_now
+from common.unset import UNSET
 from domain.auth import AuthContext, CurrentSessionReader, UserRole
 from domain.llm.model.compression_policy import (
     MAX_COMPRESSION_TOKEN_BUDGET,
@@ -14,7 +15,6 @@ from domain.llm.model.compression_policy import (
     CompressionPolicyVersion,
 )
 from domain.llm.model.profile import (
-    MODEL_PROFILE_UNSET,
     ModelProfileInput,
     ModelProfileUpdateInput,
     ModelProfileVersion,
@@ -33,7 +33,7 @@ class ModelProfileService:
         repository: ModelProfileRepository,
         auth_reader: CurrentSessionReader,
         *,
-        clock: Callable[[], datetime] = now_utc,
+        clock: Callable[[], datetime] = utc_now,
     ) -> None:
         """保存版本仓储、当前会话读取能力和时钟。"""
         self._repository = repository
@@ -106,7 +106,7 @@ class ModelProfileService:
             type(patch.expected_version) is not int or patch.expected_version < 1
         ):
             raise ModelProfileError()
-        if patch.api_key is not MODEL_PROFILE_UNSET and patch.api_key is not None:
+        if patch.api_key is not UNSET and patch.api_key is not None:
             validate_model_profile_api_key(patch.api_key)
         return await self._repository.update(actor, profile_id, patch)
 

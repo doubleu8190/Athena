@@ -76,10 +76,6 @@ export interface ParsedErrorDetail {
   memberPath?: string;
 }
 
-interface ApiRequestOptions extends Omit<RequestInit, "body"> {
-  body?: unknown;
-}
-
 type ApiMultipartOptions = Omit<RequestInit, "body">;
 
 interface PerformedRequest {
@@ -159,11 +155,22 @@ export function parseErrorDetailPayload(payload: unknown): ParsedErrorDetail {
   return { code: "http_error" };
 }
 
+function isJsonContentType(response: Response): boolean {
+  return (response.headers.get("content-type") ?? "")
+    .toLowerCase()
+    .includes("application/json");
+}
+
+function assertJsonContentType(response: Response): void {
+  if (!isJsonContentType(response)) {
+    throw new ApiError(response.status, "invalid_response");
+  }
+}
+
 export async function readErrorDetail(
   response: Response,
 ): Promise<ParsedErrorDetail> {
-  const contentType = response.headers.get("content-type") ?? "";
-  if (contentType.toLowerCase().includes("application/json")) {
+  if (isJsonContentType(response)) {
     try {
       const payload: unknown = await response.json();
       return parseErrorDetailPayload(payload);
@@ -174,19 +181,70 @@ export async function readErrorDetail(
   return { code: "http_error" };
 }
 
-function buildApiError(status: number, parsedDetail: ParsedErrorDetail): ApiError {
-  const apiErrorOptions: ApiErrorOptions | undefined =
-    parsedDetail.field !== undefined || parsedDetail.memberPath !== undefined
-      ? {
-          ...(parsedDetail.field !== undefined
-            ? { field: parsedDetail.field }
-            : {}),
-          ...(parsedDetail.memberPath !== undefined
-            ? { memberPath: parsedDetail.memberPath }
-            : {}),
-        }
-      : undefined;
-  return new ApiError(status, parsedDetail.code, apiErrorOptions);
+function buildApiError(
+  status: number,
+  parsedDetail: ParsedErrorDetail,
+  cause?: unknown,
+): ApiError {
+  const options: ApiErrorOptions = {};
+  if (parsedDetail.field !== undefined) {
+    options.field = parsedDetail.field;
+  }
+  if (parsedDetail.memberPath !== undefined) {
+    options.memberPath = parsedDetail.memberPath;
+  }
+  if (cause !== undefined) {
+    options.cause = cause;
+  }
+  return new ApiError(status, parsedDetail.code, options);
+}
+
+/**
+ * 底层请求原语（供 OpenAPI、multipart 与 download 共用）：
+ * 统一动态查找 globalThis.fetch、转换网络异常为 ApiError(0, "network_error")，
+ * 并在响应头到达时执行二段 authIdentityEpoch 校验。
+ */
+async function fetchWithIdentityEpoch(
+  url: string,
+  init: RequestInit,
+  identityEpoch: number,
+): Promise<Response> {
+  let response: Response;
+  try {
+    // 动态读取 globalThis.fetch，确保单测 vi.stubGlobal("fetch", ...) 实时生效。
+    response = await globalThis.fetch(url, init);
+  } catch (error) {
+    if (error instanceof Error && error.name === "AbortError") {
+      throw error;
+    }
+    assertAuthIdentityCurrent(identityEpoch);
+    throw new ApiError(0, "network_error", { cause: error });
+  }
+  // 二段身份校验：响应头刚到达时立刻复核，避免过期身份进入响应体读取。
+  assertAuthIdentityCurrent(identityEpoch);
+  return response;
+}
+
+/**
+ * 统一错误响应终结原语（供 OpenAPI、multipart 与 download 共用）：
+ * 执行三段 authIdentityEpoch 校验后再按状态码派发 401/403 全局事件并抛出结构化 ApiError，
+ * 确保过期请求绝不向新登录身份误发权限事件。
+ */
+function throwApiResponseError(
+  status: number,
+  path: string,
+  parsedDetail: ParsedErrorDetail,
+  identityEpoch: number,
+  cause?: unknown,
+): never {
+  assertAuthIdentityCurrent(identityEpoch);
+  if (status === 401) {
+    publishUnauthorized();
+  }
+  if (status === 403 && parsedDetail.code === "admin_required") {
+    publishAdminForbidden(path);
+  }
+  throw buildApiError(status, parsedDetail, cause);
 }
 
 /**
@@ -223,7 +281,6 @@ class OpenApiFetchRequest {
 }
 
 interface OpenApiRequestMeta {
-  expectJson: boolean;
   identityEpoch: number;
   requestUrl: string;
   response: Response | null;
@@ -256,36 +313,18 @@ function createTrackedFetch(
   return async (rawRequest: Request): Promise<Response> => {
     const { init, url } = extractRequestParts(rawRequest);
     meta.requestUrl = url;
-
-    let response: Response;
-    try {
-      // 动态读取 globalThis.fetch，确保单测 vi.stubGlobal("fetch", ...) 实时生效。
-      response = await globalThis.fetch(url, init);
-    } catch (error) {
-      if (error instanceof Error && error.name === "AbortError") {
-        throw error;
-      }
-      assertAuthIdentityCurrent(meta.identityEpoch);
-      throw new ApiError(0, "network_error", { cause: error });
-    }
-
-    // 二段身份校验：响应头刚到达时立刻复核，避免过期身份进入响应体读取。
-    assertAuthIdentityCurrent(meta.identityEpoch);
+    const response = await fetchWithIdentityEpoch(url, init, meta.identityEpoch);
     meta.response = response;
 
-    if (response.ok && response.status !== 204 && meta.expectJson) {
-      const contentType = response.headers.get("content-type") ?? "";
-      if (!contentType.toLowerCase().includes("application/json")) {
-        throw new ApiError(response.status, "invalid_response");
-      }
+    if (response.ok && response.status !== 204) {
+      assertJsonContentType(response);
     }
-
     return response;
   };
 }
 
 // 仅限本模块内部经 apiGet/apiPost/apiPut/apiPatch/apiDelete 调用，
-// 确保所有请求统一经过 executeOpenApiRequest 的三段身份代次校验与 401/403 事件派发。
+// 确保所有请求统一经过三段身份代次校验与 401/403 事件派发。
 const openapiClient: Client<paths> = createClient<paths>({
   // 生成的 OpenAPI paths 已携带 /api/v1 前缀，此处必须置空防止重复拼接。
   baseUrl: "",
@@ -300,6 +339,7 @@ const openapiClient: Client<paths> = createClient<paths>({
 
 type OpenApiClient = Client<paths>;
 type OpenApiMethod = "get" | "post" | "put" | "patch" | "delete";
+type OpenApiClientMethodKey = Uppercase<OpenApiMethod>;
 type OpenApiPath<Method extends OpenApiMethod> = ClientPathsWithMethod<
   OpenApiClient,
   Method
@@ -330,17 +370,15 @@ interface RawOpenApiResult {
 }
 
 /**
- * 统一解包 openapi-fetch 响应并执行三段 authIdentityEpoch 校验、401/403 全局事件派发与 ApiError 映射。
+ * 统一解包 openapi-fetch 响应，复用底层身份代次校验、401/403 全局事件派发与 ApiError 构造。
  */
 async function executeOpenApiRequest<T>(
   invoke: (
     trackedFetch: (request: Request) => Promise<Response>,
   ) => Promise<RawOpenApiResult>,
-  expectJson = true,
 ): Promise<T> {
   // 一段身份校验：在发起请求前锁定当前身份代次。
   const meta: OpenApiRequestMeta = {
-    expectJson,
     identityEpoch: getAuthIdentityEpoch(),
     requestUrl: "",
     response: null,
@@ -360,10 +398,13 @@ async function executeOpenApiRequest<T>(
     assertAuthIdentityCurrent(meta.identityEpoch);
     if (meta.response) {
       if (!meta.response.ok) {
-        if (meta.response.status === 401) {
-          publishUnauthorized();
-        }
-        throw new ApiError(meta.response.status, "http_error", { cause: error });
+        throwApiResponseError(
+          meta.response.status,
+          meta.requestUrl,
+          { code: "http_error" },
+          meta.identityEpoch,
+          error,
+        );
       }
       throw new ApiError(meta.response.status, "invalid_response", {
         cause: error,
@@ -372,209 +413,84 @@ async function executeOpenApiRequest<T>(
     throw new ApiError(0, "network_error", { cause: error });
   }
 
-  // 三段身份校验：JSON 或错误体读取完成后再次复核，过期请求绝不返回数据或派发 401/403 事件。
-  assertAuthIdentityCurrent(meta.identityEpoch);
-
   const { data, error, response } = result;
   if (!response.ok) {
-    const contentType = response.headers.get("content-type") ?? "";
-    const parsedDetail = contentType.toLowerCase().includes("application/json")
+    const parsedDetail = isJsonContentType(response)
       ? parseErrorDetailPayload(error)
       : { code: "http_error" };
-
-    if (response.status === 401) {
-      publishUnauthorized();
-    }
-    if (response.status === 403 && parsedDetail.code === "admin_required") {
-      publishAdminForbidden(meta.requestUrl);
-    }
-    throw buildApiError(response.status, parsedDetail);
+    throwApiResponseError(
+      response.status,
+      meta.requestUrl,
+      parsedDetail,
+      meta.identityEpoch,
+    );
   }
+
+  // 三段身份校验：JSON 响应体读取完成后复核，防止身份切换后把旧用户数据交给 Query/Mutation。
+  assertAuthIdentityCurrent(meta.identityEpoch);
 
   if (response.status === 204) {
     return undefined as T;
   }
 
-  if (expectJson && data === undefined) {
+  if (data === undefined) {
     throw new ApiError(response.status, "invalid_response");
   }
 
   return data as T;
 }
 
-function withTrackedFetch(
-  init: Record<string, unknown> | undefined,
-  trackedFetch: (request: Request) => Promise<Response>,
-): Record<string, unknown> {
-  return {
-    ...(init ?? {}),
-    fetch: trackedFetch,
+/** 泛型工厂：统一收敛 GET/POST/PUT/PATCH/DELETE 的 OpenAPI 类型推导与请求调度。 */
+function createOpenApiInvoker<Method extends OpenApiMethod>(
+  clientMethod: Uppercase<Method> & OpenApiClientMethodKey,
+) {
+  return <Path extends OpenApiPath<Method>>(
+    path: Path,
+    ...args: OpenApiInitArgs<Method, Path>
+  ): Promise<OpenApiSuccessData<Method, Path>> => {
+    const init = args[0] as Record<string, unknown> | undefined;
+    const invokeMethod = openapiClient[clientMethod] as (
+      url: Path,
+      options?: Record<string, unknown>,
+    ) => Promise<RawOpenApiResult>;
+    return executeOpenApiRequest<OpenApiSuccessData<Method, Path>>(
+      (trackedFetch) =>
+        invokeMethod(path, { ...(init ?? {}), fetch: trackedFetch }),
+    );
   };
 }
 
-export function apiGet<Path extends OpenApiPath<"get">>(
-  path: Path,
-  ...args: OpenApiInitArgs<"get", Path>
-): Promise<OpenApiSuccessData<"get", Path>> {
-  const init = args[0] as Record<string, unknown> | undefined;
-  return executeOpenApiRequest<OpenApiSuccessData<"get", Path>>((trackedFetch) =>
-    (
-      openapiClient.GET as (
-        url: Path,
-        options?: Record<string, unknown>,
-      ) => Promise<RawOpenApiResult>
-    )(path, withTrackedFetch(init, trackedFetch)),
-  );
-}
+export const apiGet = createOpenApiInvoker<"get">("GET");
+export const apiPost = createOpenApiInvoker<"post">("POST");
+export const apiPut = createOpenApiInvoker<"put">("PUT");
+export const apiPatch = createOpenApiInvoker<"patch">("PATCH");
+export const apiDelete = createOpenApiInvoker<"delete">("DELETE");
 
-export function apiPost<Path extends OpenApiPath<"post">>(
-  path: Path,
-  ...args: OpenApiInitArgs<"post", Path>
-): Promise<OpenApiSuccessData<"post", Path>> {
-  const init = args[0] as Record<string, unknown> | undefined;
-  return executeOpenApiRequest<OpenApiSuccessData<"post", Path>>(
-    (trackedFetch) =>
-      (
-        openapiClient.POST as (
-          url: Path,
-          options?: Record<string, unknown>,
-        ) => Promise<RawOpenApiResult>
-      )(path, withTrackedFetch(init, trackedFetch)),
-  );
-}
-
-export function apiPut<Path extends OpenApiPath<"put">>(
-  path: Path,
-  ...args: OpenApiInitArgs<"put", Path>
-): Promise<OpenApiSuccessData<"put", Path>> {
-  const init = args[0] as Record<string, unknown> | undefined;
-  return executeOpenApiRequest<OpenApiSuccessData<"put", Path>>((trackedFetch) =>
-    (
-      openapiClient.PUT as (
-        url: Path,
-        options?: Record<string, unknown>,
-      ) => Promise<RawOpenApiResult>
-    )(path, withTrackedFetch(init, trackedFetch)),
-  );
-}
-
-export function apiPatch<Path extends OpenApiPath<"patch">>(
-  path: Path,
-  ...args: OpenApiInitArgs<"patch", Path>
-): Promise<OpenApiSuccessData<"patch", Path>> {
-  const init = args[0] as Record<string, unknown> | undefined;
-  return executeOpenApiRequest<OpenApiSuccessData<"patch", Path>>(
-    (trackedFetch) =>
-      (
-        openapiClient.PATCH as (
-          url: Path,
-          options?: Record<string, unknown>,
-        ) => Promise<RawOpenApiResult>
-      )(path, withTrackedFetch(init, trackedFetch)),
-  );
-}
-
-export function apiDelete<Path extends OpenApiPath<"delete">>(
-  path: Path,
-  ...args: OpenApiInitArgs<"delete", Path>
-): Promise<OpenApiSuccessData<"delete", Path>> {
-  const init = args[0] as Record<string, unknown> | undefined;
-  return executeOpenApiRequest<OpenApiSuccessData<"delete", Path>>(
-    (trackedFetch) =>
-      (
-        openapiClient.DELETE as (
-          url: Path,
-          options?: Record<string, unknown>,
-        ) => Promise<RawOpenApiResult>
-      )(path, withTrackedFetch(init, trackedFetch)),
-  );
-}
-
-async function performRequest(
+async function performRawRequest(
   path: string,
   requestInit: RequestInit,
 ): Promise<PerformedRequest> {
-  const requestIdentityEpoch = getAuthIdentityEpoch();
+  const identityEpoch = getAuthIdentityEpoch();
   const headers = new Headers(requestInit.headers);
   if (!headers.has("Accept")) {
     headers.set("Accept", "application/json");
   }
 
-  let response: Response;
-  try {
-    response = await fetch(`${API_PREFIX}${path}`, {
+  const response = await fetchWithIdentityEpoch(
+    `${API_PREFIX}${path}`,
+    {
       ...requestInit,
       credentials: "same-origin",
       headers,
-    });
-  } catch (error) {
-    if (error instanceof Error && error.name === "AbortError") {
-      throw error;
-    }
-    assertAuthIdentityCurrent(requestIdentityEpoch);
-    throw new ApiError(0, "network_error", { cause: error });
-  }
-
-  // 响应头到达只代表请求仍在同一身份下，错误体读取前仍需持续校验。
-  assertAuthIdentityCurrent(requestIdentityEpoch);
+    },
+    identityEpoch,
+  );
 
   if (!response.ok) {
     const parsedDetail = await readErrorDetail(response);
-    // 错误体读取可能跨过登录/退出边界，过期请求不得发布权限事件。
-    assertAuthIdentityCurrent(requestIdentityEpoch);
-    if (response.status === 401) {
-      publishUnauthorized();
-    }
-    if (response.status === 403 && parsedDetail.code === "admin_required") {
-      publishAdminForbidden(path);
-    }
-    throw buildApiError(response.status, parsedDetail);
+    throwApiResponseError(response.status, path, parsedDetail, identityEpoch);
   }
-  return { identityEpoch: requestIdentityEpoch, response };
-}
-
-async function parseJsonResponse<T>({
-  identityEpoch,
-  response,
-}: PerformedRequest): Promise<T> {
-  assertAuthIdentityCurrent(identityEpoch);
-  if (response.status === 204) {
-    return undefined as T;
-  }
-
-  const contentType = response.headers.get("content-type") ?? "";
-  if (!contentType.toLowerCase().includes("application/json")) {
-    throw new ApiError(response.status, "invalid_response");
-  }
-
-  let payload: T;
-  try {
-    payload = (await response.json()) as T;
-  } catch (error) {
-    assertAuthIdentityCurrent(identityEpoch);
-    throw new ApiError(response.status, "invalid_response", { cause: error });
-  }
-  // 响应体读取完成后再次校验，避免身份切换后把旧用户数据交给 Query/Mutation。
-  assertAuthIdentityCurrent(identityEpoch);
-  return payload;
-}
-
-export async function apiRequest<T>(
-  path: string,
-  options: ApiRequestOptions = {},
-): Promise<T> {
-  const { body, headers: suppliedHeaders, ...requestInit } = options;
-  const headers = new Headers(suppliedHeaders);
-  if (body !== undefined) {
-    headers.set("Content-Type", "application/json");
-  }
-
-  const request = await performRequest(path, {
-    ...requestInit,
-    body: body === undefined ? undefined : JSON.stringify(body),
-    headers,
-  });
-  return parseJsonResponse<T>(request);
+  return { identityEpoch, response };
 }
 
 export async function apiMultipart<T>(
@@ -583,11 +499,26 @@ export async function apiMultipart<T>(
   options: ApiMultipartOptions = {},
 ): Promise<T> {
   // 浏览器必须自行生成 multipart boundary，不能复用 JSON 请求的 Content-Type。
-  const request = await performRequest(path, {
+  const { identityEpoch, response } = await performRawRequest(path, {
     ...options,
     body,
   });
-  return parseJsonResponse<T>(request);
+
+  if (response.status === 204) {
+    return undefined as T;
+  }
+  assertJsonContentType(response);
+
+  let payload: T;
+  try {
+    payload = (await response.json()) as T;
+  } catch (error) {
+    assertAuthIdentityCurrent(identityEpoch);
+    throw new ApiError(response.status, "invalid_response", { cause: error });
+  }
+  // 三段身份校验：响应体读取完成后再次确认身份未切换。
+  assertAuthIdentityCurrent(identityEpoch);
+  return payload;
 }
 
 export interface DownloadedFile {
@@ -626,7 +557,7 @@ export async function apiDownload(
   if (!headers.has("Accept")) {
     headers.set("Accept", "*/*");
   }
-  const { identityEpoch, response } = await performRequest(path, {
+  const { identityEpoch, response } = await performRawRequest(path, {
     ...options,
     headers,
   });

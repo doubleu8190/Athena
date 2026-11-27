@@ -1,4 +1,8 @@
 import { ApiError } from "../../shared/api/client";
+import {
+  createApiErrorMessage,
+  lookupErrorCopy,
+} from "../../shared/api/errorMessage";
 
 const KNOWLEDGE_ERROR_COPY: Record<string, string> = {
   knowledge_base_name_invalid:
@@ -61,10 +65,6 @@ const KNOWLEDGE_ERROR_COPY: Record<string, string> = {
   project_knowledge_limit_reached:
     "每个项目最多关联 20 个知识库，请先解除一个已有知识库。",
   project_not_found: "项目不存在或已删除。",
-  not_authenticated: "登录状态已失效，请重新登录。",
-  network_error: "无法连接服务器，请检查网络后重试。",
-  http_error: "服务器拒绝了本次请求，请稍后重试。",
-  invalid_response: "服务器返回了无法识别的响应，请稍后重试。",
 };
 
 const VERSION_ERROR_COPY: Record<string, string> = {
@@ -86,34 +86,16 @@ const VERSION_ERROR_COPY: Record<string, string> = {
   knowledge_processing_failed: "文档处理失败。",
 };
 
-function lookupKnowledgeErrorCopy(code: string): string | undefined {
-  // 使用 Object.hasOwn 防止原型属性键污染错误文案查表。
-  return Object.hasOwn(KNOWLEDGE_ERROR_COPY, code)
-    ? KNOWLEDGE_ERROR_COPY[code]
-    : undefined;
-}
-
-function lookupVersionErrorCopy(code: string): string | undefined {
-  return Object.hasOwn(VERSION_ERROR_COPY, code)
-    ? VERSION_ERROR_COPY[code]
-    : undefined;
-}
-
-export function knowledgeErrorMessage(error: unknown): string {
-  if (error instanceof ApiError) {
-    return (
-      lookupKnowledgeErrorCopy(error.detail) ??
-      "知识库操作未完成，请稍后重试。"
-    );
-  }
-  return "知识库操作未完成，请稍后重试。";
-}
+export const knowledgeErrorMessage = createApiErrorMessage(
+  KNOWLEDGE_ERROR_COPY,
+  "知识库操作未完成，请稍后重试。",
+);
 
 export function versionErrorMessage(code: string | null): string {
   if (!code) {
     return "处理失败，未返回具体原因。";
   }
-  return lookupVersionErrorCopy(code) ?? `处理失败（${code}）。`;
+  return lookupErrorCopy(VERSION_ERROR_COPY, code) ?? `处理失败（${code}）。`;
 }
 
 export function isKnowledgeNotFound(error: unknown): boolean {

@@ -25,7 +25,8 @@ from app.skill.errors import public_skill_error_code
 from app.skill.package_cache import SkillPackageCache, resolve_safe_child_path
 from app.skill.service import SkillService
 from common.async_utils import await_task_shielded, run_thread_shielded
-from common.ids import new_id, now_utc
+from common.date import utc_now
+from common.ids import new_id
 from domain.file import FileObjectStore, PendingSessionFile, SessionFile
 from domain.skill import (
     MAX_PACKAGE_FILE_BYTES,
@@ -76,7 +77,7 @@ class SkillExecutionService:
         package_cache: SkillPackageCache | None = None,
         worker_instance_id: str | None = None,
         id_factory: Callable[[str], str] = new_id,
-        clock: Callable[[], datetime] = now_utc,
+        clock: Callable[[], datetime] = utc_now,
     ) -> None:
         """保存固定版本、文件存储、可选本地包缓存、审计和执行端口。"""
         self._skills = skills

@@ -1,4 +1,4 @@
-import { countCodePoints as countUnicodeCodePoints } from "../../shared/lib/text";
+import { countCodePoints } from "../../shared/lib/text";
 
 export const CUSTOM_INSTRUCTIONS_MAX_LENGTH = 4000;
 export const USER_MEMORY_CONTENT_MAX_LENGTH = 500;
@@ -68,10 +68,6 @@ export const WORK_INSTRUCTION_PRESETS: readonly WorkInstructionPreset[] = [
 // 与后端 domain.preference.model._has_forbidden_control_char 对齐：
 // 拒绝除 \n / \r / \t 之外的 Unicode Cc 控制字符（含 C0 控制字符与 DEL）。
 const UNICODE_CONTROL_CHAR_PATTERN = /\p{Cc}/u;
-
-export function countCodePoints(value: string): number {
-  return countUnicodeCodePoints(value);
-}
 
 export function hasForbiddenMultilineControlChar(value: string): boolean {
   for (const character of value) {

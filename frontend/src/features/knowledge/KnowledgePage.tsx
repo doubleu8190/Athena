@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 
 import { formatDateTime } from "../../shared/lib/format";
+import { parsePage } from "../../shared/lib/pagination";
 import {
   Badge,
   Tabs,
@@ -41,14 +42,6 @@ const SCOPE_FILTER_OPTIONS: ReadonlyArray<{
   { label: "部门共享", value: "department" },
   { label: "个人", value: "personal" },
 ];
-
-function parsePage(value: string | null): number {
-  if (!value) {
-    return 1;
-  }
-  const parsed = Number(value);
-  return Number.isInteger(parsed) && parsed > 0 ? parsed : 1;
-}
 
 /** 解析知识库目录页的三层可见性筛选参数 ?scope=。 */
 function parseScopeFilter(searchParams: URLSearchParams): ScopeFilterValue {

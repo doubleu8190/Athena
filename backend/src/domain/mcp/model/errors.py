@@ -1,10 +1,6 @@
 """MCP 目录业务异常；异常文本只使用固定安全代码。"""
 
 
-class McpConfigurationError(ValueError):
-    """MCP 连接配置不合法。"""
-
-
 class McpServerNameConflictError(ValueError):
     """MCP Server 全局名称已被占用。"""
 
@@ -66,7 +62,6 @@ __all__ = [
     "McpAuthorizationChangedError",
     "McpCatalogPersistenceError",
     "McpConfigVersionConflictError",
-    "McpConfigurationError",
     "McpDiscoveryCapabilityError",
     "McpDiscoveryError",
     "McpDiscoveryProtocolError",

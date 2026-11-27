@@ -21,8 +21,8 @@ from app.auth.oauth_state import (
     validate_safe_return_to,
 )
 from app.auth.rate_limit import FixedWindowRateLimiter, RateLimiter
-from common.date import as_utc
-from common.ids import new_id, now_utc
+from common.date import as_utc, utc_now
+from common.ids import new_id
 from domain.auth import (
     AdminPromotionError,
     AuthContext,
@@ -179,7 +179,7 @@ class AuthService:
         user_id_factory: Callable[[], str] = _default_user_id,
         auth_session_id_factory: Callable[[], str] = _default_auth_session_id,
         token_factory: Callable[[], str] = _default_token,
-        clock: Callable[[], datetime] = now_utc,
+        clock: Callable[[], datetime] = utc_now,
         login_account_limiter: RateLimiter | None = None,
         login_ip_limiter: RateLimiter | None = None,
         change_password_limiter: RateLimiter | None = None,

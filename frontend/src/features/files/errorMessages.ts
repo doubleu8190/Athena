@@ -1,4 +1,8 @@
 import { ApiError } from "../../shared/api/client";
+import {
+  createApiErrorMessage,
+  lookupErrorCopy,
+} from "../../shared/api/errorMessage";
 
 const FILE_ERROR_COPY: Record<string, string> = {
   session_not_found: "会话不存在或已不可访问。",
@@ -41,7 +45,6 @@ const FILE_ERROR_COPY: Record<string, string> = {
   file_storage_unavailable: "文件存储暂时不可用，请稍后重试。",
   idempotency_conflict: "同一请求标识已用于不同内容，请重新选择文件后再试。",
   idempotency_key_invalid: "文件请求标识无效，请刷新页面后重试。",
-  network_error: "无法连接服务器，请检查网络后重试。",
   http_error: "服务器拒绝了本次文件请求，请稍后重试。",
   invalid_response: "服务器返回了无法识别的文件响应。",
 };
@@ -90,21 +93,16 @@ export function isDocumentExtractionErrorCode(
 export function extractionErrorSummary(
   code: string | null | undefined,
 ): string {
-  if (code && Object.hasOwn(EXTRACTION_ERROR_SUMMARY, code)) {
-    return EXTRACTION_ERROR_SUMMARY[code];
-  }
-  return "暂未提取到可用文本（仍可正常发送或下载原件）";
+  return (
+    (code ? lookupErrorCopy(EXTRACTION_ERROR_SUMMARY, code) : undefined) ??
+    "暂未提取到可用文本（仍可正常发送或下载原件）"
+  );
 }
 
-export function fileErrorMessage(error: unknown): string {
-  if (
-    error instanceof ApiError &&
-    Object.hasOwn(FILE_ERROR_COPY, error.detail)
-  ) {
-    return FILE_ERROR_COPY[error.detail];
-  }
-  return "文件操作未完成，请稍后重试。";
-}
+export const fileErrorMessage = createApiErrorMessage(
+  FILE_ERROR_COPY,
+  "文件操作未完成，请稍后重试。",
+);
 
 /**
  * 判断文件上传失败后是否应复用同一 Idempotency-Key：

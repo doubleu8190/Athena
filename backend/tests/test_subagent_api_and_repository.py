@@ -191,8 +191,8 @@ def test_subagent_admin_crud_lifecycle_and_errors() -> None:
         try:
             with (
                 patch.object(app.state.authenticator, "authenticate", side_effect=fake_auth_token),
-                patch("adapter.auth.repository.transaction_guard.now_utc", return_value=NOW),
-                patch("app.subagent.service.now_utc", return_value=NOW),
+                patch("adapter.auth.repository.transaction_guard.utc_now", return_value=NOW),
+                patch("app.subagent.service.utc_now", return_value=NOW),
             ):
                 transport = ASGITransport(app=app)
                 async with AsyncClient(transport=transport, base_url="http://testserver") as client:

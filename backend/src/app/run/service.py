@@ -10,8 +10,8 @@ from collections.abc import Callable
 from datetime import datetime
 
 from app.run.model.result import RunDetailsResult, RunListResult
-from common.date import as_utc
-from common.ids import new_id, now_utc
+from common.date import as_utc, utc_now
+from common.ids import new_id
 from domain.message import (
     ConversationMessageDraft,
     ConversationRole,
@@ -180,7 +180,7 @@ class RunService:
         repository: RunRepository,
         *,
         id_factory: Callable[[str], str] = new_id,
-        clock: Callable[[], datetime] = now_utc,
+        clock: Callable[[], datetime] = utc_now,
     ) -> None:
         self._repository = repository
         self._id_factory = id_factory

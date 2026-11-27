@@ -49,7 +49,6 @@ export {
   DropdownMenuRadioGroup,
   DropdownMenuRadioItem,
   DropdownMenuSeparator,
-  DropdownMenuShortcut,
   DropdownMenuSub,
   DropdownMenuSubContent,
   DropdownMenuSubTrigger,
@@ -65,7 +64,6 @@ export {
 export { Input, type InputProps } from "./Input";
 export {
   MarkdownSplitEditor,
-  applyMarkdownFormat,
   type MarkdownEditorViewMode,
   type MarkdownFormatAction,
   type MarkdownSplitEditorProps,

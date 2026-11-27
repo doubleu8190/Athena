@@ -892,3 +892,29 @@ def test_skill_read_resource_without_minio_reads_markdown_and_returns_error_for_
         assert zip_res.outcome.code == "skill_resource_unavailable"
 
     asyncio.run(scenario())
+
+
+def test_knowledge_search_without_service_keeps_stable_code_without_legacy_toggle_wording() -> None:
+    """未注入知识库服务时快照不暴露工具，直接执行返回稳定错误码且不残留旧部署开关提示。"""
+
+    async def scenario() -> None:
+        runtime, _ = _runtime(knowledge=None, project_knowledge=None)
+        auth_ctx = await runtime.authorize("owner_1", "session_1", "run_1", "auth_1")
+        assert auth_ctx is not None
+
+        snapshot = await runtime.build_snapshot("run-v2", auth_ctx)
+        assert KNOWLEDGE_SEARCH_DEFINITION.tool_id not in {item.tool_id for item in snapshot.tools}
+
+        result = await runtime.execute(
+            KNOWLEDGE_SEARCH_DEFINITION,
+            "knowledge_search",
+            {"query": "架构规范"},
+            _context(),
+            deadline_seconds=1,
+            run_remaining_seconds=10,
+        )
+        assert result.outcome.status is ToolOutcomeStatus.ERROR
+        assert result.outcome.code == "knowledge_unavailable"
+        assert "当前部署未启用" not in result.outcome.message
+
+    asyncio.run(scenario())

@@ -13,7 +13,6 @@ import {
 } from "lucide-react";
 import {
   useDeferredValue,
-  useEffect,
   useId,
   useLayoutEffect,
   useMemo,
@@ -25,6 +24,10 @@ import {
 } from "react";
 
 import { countCodePoints } from "../lib/text";
+import {
+  DEFAULT_DESKTOP_BREAKPOINT_PX,
+  useIsDesktopViewport,
+} from "../lib/viewport";
 import { MarkdownContent } from "./MarkdownContent";
 import { cn } from "./utils";
 
@@ -71,8 +74,6 @@ interface ViewTabOption {
   value: MarkdownEditorViewMode;
 }
 
-const DESKTOP_BREAKPOINT_QUERY = "(min-width: 1024px)";
-
 const DESKTOP_VIEW_TABS: readonly ViewTabOption[] = [
   { icon: Pencil, label: "仅编辑", value: "edit" },
   { icon: Columns2, label: "分栏", value: "split" },
@@ -107,7 +108,7 @@ const MARKDOWN_TABLE_TEMPLATE = [
  * 纯函数计算轻量 Markdown 排版工具栏的插入结果与恢复选区。
  * 在光标或选区位置精准插入语法并选中占位文本，便于用户直接键入覆盖。
  */
-export function applyMarkdownFormat(
+function applyMarkdownFormat(
   value: string,
   rawStart: number,
   rawEnd: number,
@@ -213,50 +214,6 @@ export function applyMarkdownFormat(
   }
 }
 
-function readDesktopViewport(): boolean {
-  if (typeof window === "undefined") {
-    return true;
-  }
-  if (typeof window.matchMedia === "function") {
-    return window.matchMedia(DESKTOP_BREAKPOINT_QUERY).matches;
-  }
-  return window.innerWidth >= 1024;
-}
-
-/**
- * 监听 >= 1024px 桌面端断点，控制三态（仅编辑/分栏/仅预览）与窄屏二态（编辑/预览）自动切换。
- */
-function useIsDesktopViewport(): boolean {
-  const [isDesktop, setIsDesktop] = useState<boolean>(readDesktopViewport);
-
-  useEffect(() => {
-    if (typeof window === "undefined") {
-      return;
-    }
-    if (typeof window.matchMedia === "function") {
-      const mql = window.matchMedia(DESKTOP_BREAKPOINT_QUERY);
-      setIsDesktop(mql.matches);
-      const handleChange = (event: MediaQueryListEvent) => {
-        setIsDesktop(event.matches);
-      };
-      if (typeof mql.addEventListener === "function") {
-        mql.addEventListener("change", handleChange);
-        return () => mql.removeEventListener("change", handleChange);
-      }
-      // 兼容旧版 Safari MediaQueryList 订阅 API。
-      mql.addListener(handleChange);
-      return () => mql.removeListener(handleChange);
-    }
-    const handleResize = () => {
-      setIsDesktop(window.innerWidth >= 1024);
-    };
-    window.addEventListener("resize", handleResize);
-    return () => window.removeEventListener("resize", handleResize);
-  }, []);
-
-  return isDesktop;
-}
-
 export function MarkdownSplitEditor({
   className,
   describedBy,
@@ -275,7 +232,10 @@ export function MarkdownSplitEditor({
   rows = 12,
   value,
 }: MarkdownSplitEditorProps) {
-  const isDesktop = useIsDesktopViewport();
+  const isDesktop = useIsDesktopViewport({
+    breakpointPx: DEFAULT_DESKTOP_BREAKPOINT_PX,
+    strategy: "matchMedia",
+  });
   // 桌面端默认分栏（左编辑右预览）；窄屏下自动折叠为「编辑 / 预览」Tabs，切回宽屏无损恢复分栏偏好。
   const [viewMode, setViewMode] = useState<MarkdownEditorViewMode>("split");
   const [localImportError, setLocalImportError] = useState<string | null>(null);

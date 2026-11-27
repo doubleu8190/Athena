@@ -1,4 +1,8 @@
-import { ApiError } from "../../shared/api/client";
+import {
+  COMMON_API_ERROR_COPY,
+  createApiErrorMessage,
+  lookupErrorCopy,
+} from "../../shared/api/errorMessage";
 
 const AUTH_ERROR_COPY: Record<string, string> = {
   invalid_credentials: "邮箱或密码不正确。",
@@ -12,7 +16,6 @@ const AUTH_ERROR_COPY: Record<string, string> = {
   rate_limited: "尝试次数过多，请稍后再试。",
   rate_limit_unavailable: "安全限流服务暂不可用，请稍后再试。",
   origin_not_allowed: "当前页面来源不允许提交请求，请确认前后端同源访问。",
-  not_authenticated: "登录状态已失效，请重新登录。",
   user_disabled: "该账号已被停用或已离职，无法登录。",
   feishu_not_enabled: "当前环境未启用飞书单点登录。",
   invalid_oauth_state: "登录校验已失效，请重新点击飞书登录。",
@@ -23,23 +26,16 @@ const AUTH_ERROR_COPY: Record<string, string> = {
   auth_mock_not_enabled: "当前环境未启用本地快捷登录模式。",
   invalid_return_to: "跳转地址无效，请从登录页重新进入。",
   network_error: "无法连接服务器，请确认后端已启动后重试。",
-  invalid_response: "服务器返回了无法识别的响应，请稍后重试。",
 };
 
-function lookupAuthErrorCopy(code: string): string | undefined {
-  // 严格通过 Object.hasOwn 校验自有属性，防止 __proto__/constructor/toString 等原型属性
-  // 被当作 React 渲染子节点引发白屏崩溃。
-  return Object.hasOwn(AUTH_ERROR_COPY, code)
-    ? AUTH_ERROR_COPY[code]
-    : undefined;
-}
-
-export function authErrorMessage(error: unknown): string {
-  if (error instanceof ApiError) {
-    return lookupAuthErrorCopy(error.detail) ?? "请求未完成，请稍后再试。";
-  }
-  return "请求未完成，请稍后再试。";
-}
+export const authErrorMessage = createApiErrorMessage(
+  {
+    ...AUTH_ERROR_COPY,
+    // 认证接口对未区分具体业务码的 5xx/非 JSON 响应维持既有通用提示文案。
+    http_error: "请求未完成，请稍后再试。",
+  },
+  "请求未完成，请稍后再试。",
+);
 
 /**
  * 将登录页 URL 查询参数（如 OAuth 回调重定向的 ?error=<code>）映射为受控中文文案，
@@ -54,7 +50,8 @@ export function authErrorCodeMessage(code: string | null): string | null {
     return null;
   }
   return (
-    lookupAuthErrorCopy(normalized) ??
+    lookupErrorCopy(AUTH_ERROR_COPY, normalized) ??
+    lookupErrorCopy(COMMON_API_ERROR_COPY, normalized) ??
     "登录未能完成，请重试或联系企业 IT 管理员。"
   );
 }

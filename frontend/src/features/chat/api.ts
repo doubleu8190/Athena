@@ -3,7 +3,6 @@ import type { SkillScope } from "../skills/model";
 import type {
   ConversationMessagePage,
   Run,
-  RunEventListResponse,
   RunListResponse,
   RunSkillSnapshot,
   RunStatus,
@@ -113,20 +112,6 @@ export async function getRun(sessionId: string, runId: string): Promise<Run> {
       params: { path: { run_id: runId, session_id: sessionId } },
     }),
   );
-}
-
-export function listRunEvents(
-  sessionId: string,
-  runId: string,
-  afterSequence = 0,
-  limit = 100,
-): Promise<RunEventListResponse> {
-  return apiGet("/api/v1/sessions/{session_id}/runs/{run_id}/events", {
-    params: {
-      path: { run_id: runId, session_id: sessionId },
-      query: { after_sequence: afterSequence, limit },
-    },
-  });
 }
 
 export interface SubmitRunOptions {

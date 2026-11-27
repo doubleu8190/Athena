@@ -51,18 +51,17 @@ from api.upload import UploadTooLargeError, staged_upload
 from app.skill import SkillService
 from app.skill.personal import PersonalSkillError
 from app.skill.service import SkillAuthorizationError, SkillUserAuthorizationError
+from common.unset import UNSET, UnsetType
 from domain.access import VisibilityGrantInput
 from domain.file import FileStorageError
 from domain.skill import (
     MAX_PACKAGE_ZIP_BYTES,
     MAX_PERSONAL_MARKDOWN_BYTES,
-    UNSET,
     SkillConflictError,
     SkillDependencyUnsatisfiedError,
     SkillNotFoundError,
     SkillPackageError,
     SkillScope,
-    UnsetType,
 )
 
 _GRANTS_ADAPTER: TypeAdapter[list[VisibilityGrantRequest]] = TypeAdapter(

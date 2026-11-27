@@ -36,10 +36,6 @@ export function useSessionList(
   });
 }
 
-export function useRecentSessions() {
-  return useSessionList({ page: 1, pageSize: 8 });
-}
-
 export function useSession(
   sessionId: string | null | undefined,
   enabled = true,
@@ -82,37 +78,12 @@ export function useUpdateSessionMutation() {
   });
 }
 
-export function useRenameSessionMutation(sessionId: string) {
-  const queryClient = useQueryClient();
-  return useMutation({
-    mutationFn: (input: SessionUpdateInput) =>
-      updateSession(sessionId, input),
-    onSuccess: async (session: Session) => {
-      queryClient.setQueryData(sessionKeys.detail(sessionId), session);
-      await invalidateSessionCaches(queryClient);
-    },
-  });
-}
-
 /** 动态删除任意会话，供侧栏直接操作多条会话行而无需预先绑定单个 sessionId。 */
 export function useDeleteAnySessionMutation() {
   const queryClient = useQueryClient();
   return useMutation({
     mutationFn: (sessionId: string) => deleteSession(sessionId),
     onSuccess: async (_data, sessionId) => {
-      queryClient.removeQueries({
-        queryKey: sessionKeys.detail(sessionId),
-      });
-      await invalidateSessionCaches(queryClient);
-    },
-  });
-}
-
-export function useDeleteSessionMutation(sessionId: string) {
-  const queryClient = useQueryClient();
-  return useMutation({
-    mutationFn: () => deleteSession(sessionId),
-    onSuccess: async () => {
       queryClient.removeQueries({
         queryKey: sessionKeys.detail(sessionId),
       });

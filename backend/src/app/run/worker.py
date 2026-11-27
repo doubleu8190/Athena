@@ -15,8 +15,8 @@ from sqlalchemy.exc import TimeoutError as SqlAlchemyTimeoutError
 from app.run.config import RunWorkerConfig
 from app.run.events import publish_pending_events
 from app.run.executor import RunExecutor
-from common.date import as_utc
-from common.ids import new_id, now_utc
+from common.date import as_utc, utc_now
+from common.ids import new_id
 from domain.run.model import (
     FailRunCommand,
     RunLease,
@@ -54,7 +54,7 @@ class RunWorker:
         *,
         worker_id: str | None = None,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
-        clock: Callable[[], datetime] = now_utc,
+        clock: Callable[[], datetime] = utc_now,
         publisher: RunEventTransport | None = None,
     ) -> None:
         """保存持久化命令、执行器及有界轮询设置。"""

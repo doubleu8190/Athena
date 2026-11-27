@@ -10,14 +10,12 @@ import {
   deleteProject,
   getProject,
   listAllProjects,
-  listProjects,
   updateProject,
   type DeleteProjectOptions,
 } from "./api";
 import type {
   Project,
   ProjectCreateInput,
-  ProjectListQuery,
   ProjectUpdateInput,
 } from "./model";
 import { projectKeys } from "./queryKeys";
@@ -35,13 +33,6 @@ export function useProjectDirectory() {
   return useQuery({
     queryFn: listAllProjects,
     queryKey: projectKeys.directory(),
-  });
-}
-
-export function useProjectList(query: ProjectListQuery = {}) {
-  return useQuery({
-    queryFn: () => listProjects(query),
-    queryKey: projectKeys.list(query),
   });
 }
 

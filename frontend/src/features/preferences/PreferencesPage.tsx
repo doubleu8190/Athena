@@ -29,6 +29,7 @@ import {
   cn,
   toast,
 } from "../../shared/ui";
+import { countCodePoints } from "../../shared/lib/text";
 import { preferenceErrorMessage } from "./errorMessages";
 import {
   useCreateUserMemoryMutation,
@@ -45,7 +46,6 @@ import {
   USER_MEMORY_WARNING_THRESHOLD,
   WORK_INSTRUCTION_PRESETS,
   applyInstructionPreset,
-  countCodePoints,
   validateCustomInstructions,
   validateUserMemoryContent,
   type UserMemory,

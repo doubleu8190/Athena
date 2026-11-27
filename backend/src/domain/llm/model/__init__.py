@@ -7,17 +7,14 @@ from domain.llm.model.compression_policy import (
 )
 from domain.llm.model.errors import (
     LlmCapabilityError,
-    LlmConfigurationError,
     LlmError,
     LlmIncompleteError,
     LlmProtocolError,
     LlmProviderError,
     LlmRefusalError,
     LlmRequestError,
-    LlmToolArgumentsError,
 )
 from domain.llm.model.profile import (
-    MODEL_PROFILE_UNSET,
     ModelProfileInput,
     ModelProfileUpdateInput,
     ModelProfileVersion,
@@ -54,7 +51,6 @@ from domain.llm.model.types import (
 
 __all__ = [
     "LlmCapabilityError",
-    "LlmConfigurationError",
     "LlmContentPart",
     "LlmError",
     "LlmImageDetail",
@@ -74,7 +70,6 @@ __all__ = [
     "LlmTextPart",
     "LlmStreamEvent",
     "LlmTool",
-    "LlmToolArgumentsError",
     "LlmToolCall",
     "LlmUsage",
     "ResponseCompleted",
@@ -82,7 +77,6 @@ __all__ = [
     "ToolArgumentsDelta",
     "ToolCallCompleted",
     "ToolCallStarted",
-    "MODEL_PROFILE_UNSET",
     "ModelProfileInput",
     "ModelProfileUpdateInput",
     "CompressionPolicyInput",

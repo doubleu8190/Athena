@@ -37,12 +37,12 @@ import {
   cn,
   toast,
 } from "../../shared/ui";
+import { fileExtension } from "../../shared/lib/file";
 import { MarkdownContent } from "../../shared/ui/MarkdownContent";
 import { extractionErrorSummary } from "../files/errorMessages";
 import {
   canInlinePreviewFile,
   fileDisplayName,
-  fileExtension,
   isPreviewableImageFile,
   mergeSafeFileMimeType,
   sessionFilePreviewUrl,

@@ -40,7 +40,7 @@ function lineRange(locator: KnowledgeLocator): string | null {
   return null;
 }
 
-export function formatKnowledgeLocator(
+function formatKnowledgeLocator(
   locator: KnowledgeLocator,
 ): string {
   const kind = textValue(locator.kind);

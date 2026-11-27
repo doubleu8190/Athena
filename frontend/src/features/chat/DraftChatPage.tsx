@@ -55,7 +55,7 @@ import {
 } from "./ComposerAttachmentBar";
 import { useDraftChat } from "./DraftChatContext";
 import { chatErrorMessage, requestIdCanBeReused } from "./errorMessages";
-import { newRequestId } from "./requestId";
+import { newRequestId } from "../../shared/lib/requestId";
 import { ChatComposer } from "./SessionComposer";
 
 const UNBOUND_PROJECT_VALUE = "__unbound__";

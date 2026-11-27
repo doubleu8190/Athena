@@ -20,7 +20,7 @@ from packaging.requirements import InvalidRequirement, Requirement
 from packaging.utils import canonicalize_name
 from packaging.version import InvalidVersion, Version
 
-from common.ids import now_utc
+from common.date import utc_now
 from domain.skill.model import (
     DependencyCheck,
     DependencyCheckItem,
@@ -208,7 +208,7 @@ class DependencyChecker:
         self,
         *,
         python_executable: str | Path | None = None,
-        clock: Callable[[], datetime] = now_utc,
+        clock: Callable[[], datetime] = utc_now,
         monotonic_clock: Callable[[], float] = time.monotonic,
         environment_cache_ttl_seconds: float = _DEFAULT_ENVIRONMENT_CACHE_TTL_SECONDS,
         probe_timeout_seconds: float = _DEFAULT_PROBE_TIMEOUT_SECONDS,

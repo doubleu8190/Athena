@@ -9,7 +9,12 @@ import { onlineManager } from "@tanstack/react-query";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { ApiError, apiRequest } from "../../shared/api/client";
+import {
+  ApiError,
+  apiDownload,
+  apiGet,
+  apiPatch,
+} from "../../shared/api/client";
 import { makeDeptAdmin, makeSuperAdmin, makeUser } from "../../test/fixtures";
 import { adminKeys } from "../admin/queryKeys";
 import { jsonResponse, renderApp } from "../../test/testUtils";
@@ -1865,7 +1870,7 @@ describe("全站三级角色与分级路由守卫", () => {
           return jsonResponse({ items: [] });
         }
         if (
-          url.endsWith("/api/v1/admin/models") ||
+          url.endsWith("/api/v1/admin/llm/model-profiles") ||
           url.endsWith("/api/v1/admin/skills/executions/exec-1") ||
           url.endsWith("/api/v1/admin/skills/company-skill-1")
         ) {
@@ -1885,8 +1890,10 @@ describe("全站三级角色与分级路由守卫", () => {
 
     // 1. 触发超管专属接口与技能执行日志接口 403：不清空技能缓存、不阻断 /admin/skills。
     await act(async () => {
-      await apiRequest("/admin/models").catch(() => undefined);
-      await apiRequest("/admin/skills/executions/exec-1").catch(() => undefined);
+      await apiGet("/api/v1/admin/llm/model-profiles").catch(() => undefined);
+      await apiDownload("/admin/skills/executions/exec-1").catch(
+        () => undefined,
+      );
     });
     expect(
       screen.queryByRole("heading", { name: "当前账号没有管理员权限" }),
@@ -1897,9 +1904,14 @@ describe("全站三级角色与分级路由守卫", () => {
     // 2. 触发单个资源级 /admin/skills/{id} 403：静默复核 /auth/me，仍保留 /admin/skills 页面不卸载。
     const callsBeforeResourceForbidden = authMeCalls;
     await act(async () => {
-      await apiRequest("/admin/skills/company-skill-1", {
-        method: "PATCH",
-        body: { enabled: true },
+      await apiPatch("/api/v1/admin/skills/{skill_id}", {
+        body: {
+          current_version_id: "ver-1",
+          enabled: true,
+          expected_revision: 1,
+          script_requires_approval: false,
+        },
+        params: { path: { skill_id: "company-skill-1" } },
       }).catch(() => undefined);
     });
     await waitFor(() => {
@@ -1934,7 +1946,9 @@ describe("全站三级角色与分级路由守卫", () => {
     await screen.findByRole("group", { name: "部门管理" });
     currentIdentity = USER;
     await act(async () => {
-      await apiRequest("/admin/skills/skill-99").catch(() => undefined);
+      await apiGet("/api/v1/admin/skills/{skill_id}", {
+        params: { path: { skill_id: "skill-99" } },
+      }).catch(() => undefined);
     });
     expect(
       await screen.findByRole("heading", { name: "当前账号没有管理员权限" }),
@@ -2002,7 +2016,7 @@ describe("全站三级角色与分级路由守卫", () => {
         if (url.endsWith("/api/v1/admin/skills")) {
           return jsonResponse({ items: [] });
         }
-        if (url.endsWith("/api/v1/admin/models")) {
+        if (url.endsWith("/api/v1/admin/tools")) {
           return jsonResponse({ detail: "admin_required" }, 403);
         }
         if (url.endsWith("/admin/llm/model-profiles")) {
@@ -2038,7 +2052,7 @@ describe("全站三级角色与分级路由守卫", () => {
 
     // 先触发 superAdminAccessDenied = true。
     await act(async () => {
-      await apiRequest("/admin/models").catch(() => undefined);
+      await apiGet("/api/v1/admin/tools").catch(() => undefined);
     });
 
     // 登出后用 Mock 登录切换为超级管理员，直接进入 /admin/models 不出现无权限页。

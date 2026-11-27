@@ -3,21 +3,25 @@ import {
   useContext,
   useEffect,
   useId,
+  useLayoutEffect,
   useRef,
   useState,
+  type KeyboardEvent,
   type PropsWithChildren,
   type ReactNode,
 } from "react";
-import { createPortal } from "react-dom";
 
 import {
-  FOCUSABLE_SELECTOR,
-  getFocusableElements,
-} from "./focus";
+  Dialog,
+  DialogClose,
+  DialogContent,
+  DialogDescription,
+  DialogTitle,
+} from "./Dialog";
 import { Icon } from "./Icons";
 import { cn } from "./utils";
 
-interface ModalProps extends PropsWithChildren {
+export interface ModalProps extends PropsWithChildren {
   closeDisabled?: boolean;
   description?: string;
   footer?: ReactNode;
@@ -33,20 +37,19 @@ interface ModalLayer {
   order: number;
 }
 
+// 维护嵌套深度与挂载顺序，确保即使父子 Modal 在同一 commit 中同时以 open={true} 挂载，
+// 深度更大的内层弹窗也始终判定为栈顶，避免 useLayoutEffect 子先父后执行造成死锁。
 const ModalDepthContext = createContext(-1);
-const modalStack: ModalLayer[] = [];
+const openModalStack: ModalLayer[] = [];
 const modalStackListeners = new Set<() => void>();
 let nextModalOrder = 0;
-// 记录首个弹窗打开前页面的原始 overflow；仅当所有活跃弹窗都关闭时才恢复，避免嵌套弹窗非 LIFO 卸载提前解锁或永久锁死滚动。
-let savedBodyOverflow: string | null = null;
 
-// 所有弹窗共享层级栈，只有栈顶弹窗处理关闭键、遮罩和焦点循环。
-function notifyModalStack() {
+function notifyModalStack(): void {
   modalStackListeners.forEach((listener) => listener());
 }
 
 function isTopModal(modalId: string): boolean {
-  const topModal = modalStack.reduce<ModalLayer | null>((top, layer) => {
+  const topModal = openModalStack.reduce<ModalLayer | null>((top, layer) => {
     if (
       !top ||
       layer.depth > top.depth ||
@@ -59,34 +62,50 @@ function isTopModal(modalId: string): boolean {
   return topModal?.id === modalId;
 }
 
-function registerModal(layer: ModalLayer) {
-  const wasEmpty = modalStack.length === 0;
-  const existingIndex = modalStack.findIndex(
-    (item) => item.id === layer.id,
+const ENABLED_TABBABLE_SELECTOR = [
+  'button:not(:disabled):not([tabindex="-1"])',
+  'a[href]:not([tabindex="-1"])',
+  'input:not(:disabled):not([type="hidden"]):not([tabindex="-1"])',
+  'select:not(:disabled):not([tabindex="-1"])',
+  'textarea:not(:disabled):not([tabindex="-1"])',
+  '[tabindex]:not([tabindex="-1"]):not(:disabled)',
+].join(",");
+
+/**
+ * 兜底修复 Radix FocusScope 未识别 `<fieldset disabled>` 后代控件的已知边界：
+ * 仅在弹窗内存在禁用 fieldset 且焦点位于真实首/尾可聚焦控件时接管 Tab 循环。
+ */
+function handleFieldsetDisabledTabLoop(
+  event: KeyboardEvent<HTMLDivElement>,
+): void {
+  if (event.key !== "Tab" || event.altKey || event.ctrlKey || event.metaKey) {
+    return;
+  }
+  const container = event.currentTarget;
+  if (!container.querySelector("fieldset:disabled")) {
+    return;
+  }
+  const controls = Array.from(
+    container.querySelectorAll<HTMLElement>(ENABLED_TABBABLE_SELECTOR),
   );
-  if (existingIndex >= 0) {
-    modalStack.splice(existingIndex, 1);
+  if (controls.length === 0) {
+    return;
   }
-  modalStack.push(layer);
-  if (wasEmpty && modalStack.length > 0) {
-    savedBodyOverflow = document.body.style.overflow;
-    document.body.style.overflow = "hidden";
-  }
-  notifyModalStack();
-}
-
-function unregisterModal(modalId: string) {
-  const index = modalStack.findIndex((layer) => layer.id === modalId);
-  if (index >= 0) {
-    modalStack.splice(index, 1);
-    if (modalStack.length === 0 && savedBodyOverflow !== null) {
-      document.body.style.overflow = savedBodyOverflow;
-      savedBodyOverflow = null;
-    }
-    notifyModalStack();
+  const first = controls[0];
+  const last = controls[controls.length - 1];
+  if (event.shiftKey && document.activeElement === first) {
+    event.preventDefault();
+    last.focus();
+  } else if (!event.shiftKey && document.activeElement === last) {
+    event.preventDefault();
+    first.focus();
   }
 }
 
+/**
+ * 业务弹窗统一封装，底层复用 Radix Dialog（Dialog.tsx）的焦点陷阱、Escape 层级栈、
+ * 遮罩外部点击关闭与滚动锁定能力，保留既有 Modal Props、业务宽度类名与受控焦点归还语义。
+ */
 export function Modal({
   children,
   closeDisabled = false,
@@ -100,36 +119,44 @@ export function Modal({
   const parentDepth = useContext(ModalDepthContext);
   const modalDepth = parentDepth + 1;
   const modalId = useId();
-  const titleId = useId();
-  const descriptionId = useId();
-  const panelRef = useRef<HTMLDivElement>(null);
+  const contentRef = useRef<HTMLDivElement>(null);
   const previousFocusRef = useRef<HTMLElement | null>(null);
-  const onCloseRef = useRef(onClose);
-  const closeDisabledRef = useRef(closeDisabled);
   const [isTopmost, setIsTopmost] = useState(false);
 
-  useEffect(() => {
-    onCloseRef.current = onClose;
-    closeDisabledRef.current = closeDisabled;
-  }, [closeDisabled, onClose]);
-
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (!open) {
+      setIsTopmost(false);
       return;
     }
 
+    // 在子组件 Radix FocusScope 的 useEffect 移动焦点之前，同步记录触发元素。
+    previousFocusRef.current =
+      document.activeElement instanceof HTMLElement
+        ? document.activeElement
+        : null;
+
     const updateTopmost = () => setIsTopmost(isTopModal(modalId));
     modalStackListeners.add(updateTopmost);
-    registerModal({
+    const existingIndex = openModalStack.findIndex(
+      (layer) => layer.id === modalId,
+    );
+    if (existingIndex >= 0) {
+      openModalStack.splice(existingIndex, 1);
+    }
+    openModalStack.push({
       depth: modalDepth,
       id: modalId,
       order: ++nextModalOrder,
     });
-    updateTopmost();
+    notifyModalStack();
 
     return () => {
       modalStackListeners.delete(updateTopmost);
-      unregisterModal(modalId);
+      const index = openModalStack.findIndex((layer) => layer.id === modalId);
+      if (index >= 0) {
+        openModalStack.splice(index, 1);
+        notifyModalStack();
+      }
     };
   }, [modalDepth, modalId, open]);
 
@@ -138,132 +165,104 @@ export function Modal({
       return;
     }
 
-    previousFocusRef.current =
-      document.activeElement instanceof HTMLElement
-        ? document.activeElement
-        : null;
-
-    const focusInitialControl = () => {
-      const panel = panelRef.current;
-      if (!isTopModal(modalId)) {
-        return;
-      }
-      // 保留 data-autofocus 的显式优先级，兼容隐藏文件输入的既有程序化聚焦。
-      const target =
-        panel?.querySelector<HTMLElement>("[data-autofocus]") ??
-        panel?.querySelector<HTMLElement>(FOCUSABLE_SELECTOR);
-      target?.focus();
-    };
-    const timer = window.setTimeout(focusInitialControl, 0);
-
-    const handleKeyDown = (event: KeyboardEvent) => {
-      if (!isTopModal(modalId)) {
-        return;
-      }
-      if (event.key === "Escape") {
-        const escapeOwner = (event.target as Element | null)?.closest?.(
-          "[data-modal-escape-owner]",
-        );
-        if (escapeOwner) {
-          // 弹层内的展开控件先消费 Escape，Modal 在后续按键中再关闭。
-          return;
-        }
-        event.preventDefault();
-        if (!closeDisabledRef.current) {
-          onCloseRef.current();
-        }
-        return;
-      }
-      if (event.key !== "Tab" || !panelRef.current) {
-        return;
-      }
-
-      // 焦点在本对话框内循环，避免键盘用户落到遮罩后的页面控件。
-      const controls = getFocusableElements(panelRef.current);
-      if (controls.length === 0) {
-        event.preventDefault();
-        panelRef.current.focus();
-        return;
-      }
-      const first = controls[0];
-      const last = controls[controls.length - 1];
-      if (event.shiftKey && document.activeElement === first) {
-        event.preventDefault();
-        last.focus();
-      } else if (!event.shiftKey && document.activeElement === last) {
-        event.preventDefault();
-        first.focus();
-      }
-    };
-
-    document.addEventListener("keydown", handleKeyDown, true);
+    // 子组件 FocusScope 的 useEffect cleanup 会先于此处解除焦点陷阱，
+    // 在此同步归还焦点可避免被尚未卸载的 FocusScope focusin 监听器抢回后跌落到 body。
     return () => {
-      window.clearTimeout(timer);
-      document.removeEventListener("keydown", handleKeyDown, true);
-      previousFocusRef.current?.focus();
+      const target = previousFocusRef.current;
+      previousFocusRef.current = null;
+      if (target?.isConnected) {
+        target.focus();
+      }
     };
-  }, [modalId, open]);
-
-  if (!open) {
-    return null;
-  }
+  }, [open]);
 
   const requestClose = () => {
-    if (isTopModal(modalId) && !closeDisabledRef.current) {
-      onCloseRef.current();
+    if (isTopModal(modalId) && !closeDisabled) {
+      onClose();
     }
   };
 
-  return createPortal(
-    <ModalDepthContext.Provider value={modalDepth}>
-      <div
-        className="modal-backdrop fixed inset-0 z-[var(--z-dialog)] grid place-items-center overflow-y-auto bg-black/40 p-3 backdrop-blur-[2px] max-sm:items-end sm:px-[18px] sm:py-7"
-        onMouseDown={(event) => {
-          if (event.target === event.currentTarget) {
-            requestClose();
+  return (
+    <Dialog
+      onOpenChange={(nextOpen) => {
+        if (!nextOpen) {
+          requestClose();
+        }
+      }}
+      open={open}
+    >
+      <DialogContent
+        {...(description ? {} : { "aria-describedby": undefined })}
+        aria-modal={isTopmost ? "true" : undefined}
+        className={cn(
+          "modal-card overflow-hidden rounded-[14px]",
+          panelClassName,
+        )}
+        closeDisabled={closeDisabled}
+        hideCloseButton
+        onCloseAutoFocus={(event) => {
+          // 阻止 Radix 在无 DialogTrigger 时将焦点重置到 body，交由上方 cleanup 精确归还。
+          event.preventDefault();
+        }}
+        onEscapeKeyDown={(event) => {
+          if (!isTopModal(modalId)) {
+            event.preventDefault();
+            return;
+          }
+          // 兼容声明自管 Escape 的嵌套控件（如展开中的 Select 触发器），让其优先消费按键。
+          const escapeOwner = (event.target as Element | null)?.closest?.(
+            "[data-modal-escape-owner]",
+          );
+          if (escapeOwner) {
+            event.preventDefault();
           }
         }}
-        role="presentation"
+        onInteractOutside={(event) => {
+          if (!isTopModal(modalId)) {
+            event.preventDefault();
+          }
+        }}
+        onKeyDown={handleFieldsetDisabledTabLoop}
+        onOpenAutoFocus={(event) => {
+          // 保留 data-autofocus 的显式聚焦优先级，兼容隐藏文件输入与表单首字段聚焦。
+          const target =
+            contentRef.current?.querySelector<HTMLElement>("[data-autofocus]");
+          if (target) {
+            event.preventDefault();
+            target.focus();
+          }
+        }}
+        onPointerDownOutside={(event) => {
+          if (!isTopModal(modalId)) {
+            event.preventDefault();
+          }
+        }}
+        ref={contentRef}
+        size="none"
       >
-        <div
-          aria-describedby={description ? descriptionId : undefined}
-          aria-labelledby={titleId}
-          aria-modal={isTopmost ? "true" : undefined}
-          className={cn(
-            "modal-card flex flex-col overflow-hidden rounded-[14px] border border-border-default bg-canvas shadow-md",
-            panelClassName,
-          )}
-          ref={panelRef}
-          role="dialog"
-          tabIndex={-1}
-        >
-          <header className="modal-header flex shrink-0 items-start justify-between gap-5 border-b border-border-subtle px-4 pt-5 pb-4 sm:px-[22px]">
-            <div>
-              <h2
-                className="text-lg font-semibold tracking-tight text-text-primary"
-                id={titleId}
-              >
-                {title}
-              </h2>
-              {description ? (
-                <p
-                  className="mt-1 text-xs leading-relaxed text-text-secondary"
-                  id={descriptionId}
-                >
-                  {description}
-                </p>
-              ) : null}
-            </div>
+        <header className="modal-header flex shrink-0 items-start justify-between gap-5 border-b border-border-subtle px-4 pt-5 pb-4 sm:px-[22px]">
+          <div>
+            <DialogTitle className="text-lg font-semibold tracking-tight text-text-primary">
+              {title}
+            </DialogTitle>
+            {description ? (
+              <DialogDescription className="mt-1 text-xs leading-relaxed text-text-secondary">
+                {description}
+              </DialogDescription>
+            ) : null}
+          </div>
+          <DialogClose asChild>
             <button
               aria-label="关闭弹窗"
-              className="modal-close grid h-[31px] w-[31px] shrink-0 place-items-center rounded-[7px] bg-transparent text-text-tertiary transition-colors hover:enabled:bg-subtle hover:enabled:text-text-primary"
+              className="modal-close grid h-[31px] w-[31px] shrink-0 place-items-center rounded-[7px] bg-transparent text-text-tertiary transition-colors hover:enabled:bg-subtle hover:enabled:text-text-primary disabled:pointer-events-none disabled:opacity-40"
               disabled={closeDisabled}
-              onClick={requestClose}
               type="button"
             >
               <Icon name="close" size={17} />
             </button>
-          </header>
+          </DialogClose>
+        </header>
+        <ModalDepthContext.Provider value={modalDepth}>
           <div className="modal-body flex min-h-0 min-w-0 flex-1 flex-col gap-[13px] overflow-y-auto px-4 py-[18px] sm:px-[22px]">
             {children}
           </div>
@@ -272,10 +271,8 @@ export function Modal({
               {footer}
             </footer>
           ) : null}
-        </div>
-      </div>
-    </ModalDepthContext.Provider>,
-    document.body,
+        </ModalDepthContext.Provider>
+      </DialogContent>
+    </Dialog>
   );
 }
-

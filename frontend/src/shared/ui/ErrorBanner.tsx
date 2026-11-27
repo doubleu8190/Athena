@@ -1,4 +1,4 @@
-import { Icon } from "./Icons";
+import { InlineAlert } from "./InlineAlert";
 
 interface ErrorBannerProps {
   message: string;
@@ -6,24 +6,27 @@ interface ErrorBannerProps {
   retryLabel?: string;
 }
 
+/**
+ * 紧凑型错误提示横幅，统一复用 InlineAlert 的 danger 变体与 role="alert" 无障碍语义。
+ */
 export function ErrorBanner({
   message,
   onRetry,
   retryLabel = "重试",
 }: ErrorBannerProps) {
   return (
-    <div
-      className="workspace-error flex items-start gap-[9px] rounded-[9px] border border-danger-border bg-danger-bg px-3 py-[11px] text-xs leading-relaxed text-danger"
-      role="alert"
+    <InlineAlert
+      action={
+        onRetry ? (
+          <button className="text-button" onClick={onRetry} type="button">
+            {retryLabel}
+          </button>
+        ) : undefined
+      }
+      className="workspace-error gap-[9px] rounded-[9px] px-3 py-[11px] text-xs leading-relaxed"
+      variant="danger"
     >
-      <Icon className="mt-px shrink-0" name="shield" size={17} />
-      <span className="flex-1">{message}</span>
-      {onRetry ? (
-        <button className="text-button" onClick={onRetry} type="button">
-          {retryLabel}
-        </button>
-      ) : null}
-    </div>
+      {message}
+    </InlineAlert>
   );
 }
-

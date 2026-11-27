@@ -38,8 +38,8 @@ from adapter.session.model import SessionModel
 from adapter.skill.repository import build_run_skill_snapshot
 from adapter.subagent.model import SubagentModel
 from adapter.system_prompt.repository import current_system_prompts
-from common.date import as_utc
-from common.ids import new_id, now_utc
+from common.date import as_utc, utc_now
+from common.ids import new_id
 from domain.access import ResourceType, UserAccessSnapshot
 from domain.auth import UserRole
 from domain.message import (
@@ -206,7 +206,7 @@ class RunLifecycleMixin(RunRepositorySupportMixin):
                         locked_session=locked_session,
                     )
                     created_at = await self._database_now(session)
-                    current = now_utc()
+                    current = utc_now()
                     row = RunModel(
                         id=command.run_id,
                         session_id=session_id,
@@ -523,7 +523,7 @@ class RunLifecycleMixin(RunRepositorySupportMixin):
                     return None
                 if row.tool_snapshot is None:
                     row.tool_snapshot = snapshot.model_dump(mode="json")
-                    row.updated_at = db_now or now_utc()
+                    row.updated_at = db_now or utc_now()
                     return snapshot
                 return RuntimeToolSnapshot.model_validate(row.tool_snapshot)
 

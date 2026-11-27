@@ -17,7 +17,6 @@ from app.file.service import FileInputError, SessionFileService
 from app.knowledge.service import (
     KnowledgeInputError,
     KnowledgeNotFoundError,
-    KnowledgeSearchUnavailableError,
     KnowledgeService,
 )
 from app.preference import PreferenceService
@@ -483,15 +482,9 @@ class RunToolRuntimeService(RunToolRuntime):
            - 按确定优先级去重排序（项目绑定库 > 部门库 > 公司库），超过 20 个时截取前 20 个。
 
         安全边界：
-        - 仅允许在单次范围解析或单次 build_snapshot 内复用 snapshot，每次工具执行前仍实时鉴权。
+        - 仅允许在单次范围解析或单次 build_snapshot 内复用 snapshot，每次工具执行前仍实时鉴权；
+        - 调用方须在进入前确认已装配 KnowledgeService。
         """
-        if self._knowledge is None:
-            return _KnowledgeScopeResolution(
-                (),
-                "knowledge_unavailable",
-                "当前部署未启用知识库检索能力。",
-            )
-
         if knowledge_base_ids is not None:
             ordered_ids = tuple(dict.fromkeys(knowledge_base_ids))
             if not ordered_ids:
@@ -1233,8 +1226,9 @@ class RunToolRuntimeService(RunToolRuntime):
         knowledge_base_ids: tuple[str, ...] | None = None,
     ) -> ToolOutcome:
         del deadline_seconds
+        # 生产环境无条件装配知识库服务；此处保留保护，兼容未注入知识库依赖的测试或最小运行时。
         if self._knowledge is None:
-            return _error("knowledge_unavailable", "当前部署未启用知识库检索能力。")
+            return _error("knowledge_unavailable", "知识库检索服务当前不可用。")
         # 执行前实时解析并鉴权有效知识库集合（支持无项目共享库、项目并集与显式限定）。
         try:
             before_scope = await self._resolve_knowledge_scope(
@@ -1270,9 +1264,8 @@ class RunToolRuntimeService(RunToolRuntime):
             )
         except (KnowledgeInputError, KnowledgeNotFoundError):
             return _error("knowledge_scope_unavailable", "知识库查询范围已不可用。")
-        except KnowledgeSearchUnavailableError:
-            return _error("knowledge_unavailable", "知识检索暂时不可用。")
         except Exception:
+            # 含 KnowledgeSearchUnavailableError 及底层意外异常，统一降级为确定性工具错误。
             return _error("knowledge_unavailable", "知识检索暂时不可用。")
         # 校验检索返回命中均落于本次已授权的 searched_ids 范围，拦截越界结果。
         searched_ids = set(base_ids)

@@ -471,51 +471,6 @@ async def _has_matching_grant_in_session(
     return matched is not None
 
 
-async def filter_readable_targets_in_session(
-    session: AsyncSession,
-    user_id: str,
-    targets: Sequence[ResourceAccessTarget],
-    *,
-    snapshot: UserAccessSnapshot | None = None,
-) -> set[str]:
-    """在同一数据库事务快照内批量过滤当前用户可读的资源 ID（支持透传已有快照复用）。"""
-    if not targets:
-        return set()
-    resolved = (
-        snapshot
-        if snapshot is not None
-        else await load_user_access_snapshot_in_session(session, user_id)
-    )
-    if resolved is None or not resolved.is_active:
-        return set()
-
-    readable: set[str] = set()
-    pending_by_type: dict[ResourceType, list[str]] = {}
-    for target in targets:
-        fast = _fast_can_read_target(resolved, target)
-        if fast is True:
-            readable.add(target.resource_id)
-        elif fast is None:
-            pending_by_type.setdefault(target.resource_type, []).append(target.resource_id)
-
-    # 仅对无法通过角色/管辖部门快速判定的 department 目标执行单条 SQL 授权匹配。
-    for resource_type, pending_ids in pending_by_type.items():
-        unique_pending = tuple(dict.fromkeys(pending_ids))
-        matched_ids = (
-            await session.scalars(
-                select(ResourceVisibilityGrantModel.resource_id)
-                .where(
-                    ResourceVisibilityGrantModel.resource_type == resource_type.value,
-                    ResourceVisibilityGrantModel.resource_id.in_(unique_pending),
-                    _build_grant_match_clause(resolved),
-                )
-                .distinct()
-            )
-        ).all()
-        readable.update(matched_ids)
-    return readable
-
-
 class SqlAlchemyAccessControlRepository(AccessControlRepository):
     """基于 async SQLAlchemy 实时读取组织权限树与资源授权表的仓储实现。"""
 
@@ -862,7 +817,6 @@ __all__ = [
     "SqlAlchemyAccessControlRepository",
     "build_readable_resource_clause",
     "delete_resource_grants_in_session",
-    "filter_readable_targets_in_session",
     "grant_to_domain",
     "list_active_department_ids_in_session",
     "load_grants_map_in_session",

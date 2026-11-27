@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Callable, Sequence
 from datetime import datetime
 
-from common.ids import now_utc
+from common.date import utc_now
 from domain.access import (
     PERSONAL_CAPABLE_RESOURCE_TYPES,
     AccessControlRepository,
@@ -32,7 +32,7 @@ class AccessPolicyService:
         self,
         repository: AccessControlRepository,
         *,
-        clock: Callable[[], datetime] = now_utc,
+        clock: Callable[[], datetime] = utc_now,
     ) -> None:
         """保存权限引擎仓储端口与时钟来源。"""
         self._repository = repository

@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-from adapter.auth.model.auth import AuthSessionModel, UserModel
+from adapter.auth.model.auth import UserModel
 from common.date import as_utc
-from domain.auth import AuthProvider, AuthSession, User, UserRole, UserStatus
+from domain.auth import AuthProvider, User, UserRole, UserStatus
 
 
 def user_to_domain(row: UserModel) -> User:
@@ -29,16 +29,4 @@ def user_to_domain(row: UserModel) -> User:
     )
 
 
-def auth_session_to_domain(row: AuthSessionModel) -> AuthSession:
-    """把登录会话 ORM 行转换为领域对象。"""
-    return AuthSession(
-        id=row.id,
-        user_id=row.user_id,
-        token_hash=row.token_hash,
-        expires_at=as_utc(row.expires_at),
-        revoked_time=(as_utc(row.revoked_time) if row.revoked_time is not None else None),
-        created_at=as_utc(row.created_at),
-    )
-
-
-__all__ = ["auth_session_to_domain", "user_to_domain"]
+__all__ = ["user_to_domain"]

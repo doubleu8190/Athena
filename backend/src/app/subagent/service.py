@@ -6,7 +6,9 @@ from collections.abc import Callable
 from datetime import datetime
 
 from app.access import AccessPolicyService
-from common.ids import new_id, now_utc
+from common.date import utc_now
+from common.ids import new_id
+from common.unset import UnsetType
 from domain.access import (
     AccessPermissionDeniedError,
     InvalidVisibilityConfigError,
@@ -30,7 +32,6 @@ from domain.subagent import (
     SubagentToolCatalog,
     SubagentUpdatePatch,
     SubagentValidationError,
-    UnsetType,
     UpdateSubagentCommand,
     validate_subagent_allowed_tool_ids,
     validate_subagent_description,
@@ -57,7 +58,7 @@ class SubagentService:
         model_checker: SubagentModelChecker | None = None,
         tool_catalog: SubagentToolCatalog | None = None,
         id_factory: Callable[[str], str] = new_id,
-        clock: Callable[[], datetime] = now_utc,
+        clock: Callable[[], datetime] = utc_now,
     ) -> None:
         """保存仓储、会话读取、权限引擎、模型/工具校验端口与基础设施依赖。"""
         self._repository = repository

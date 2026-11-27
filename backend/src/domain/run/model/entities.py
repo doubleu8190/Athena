@@ -452,19 +452,6 @@ class RunEvent:
 
 
 @dataclass(frozen=True, slots=True)
-class RunRequest:
-    """客户端命令的幂等账本记录。"""
-
-    owner_id: str
-    session_id: str
-    operation: RunRequestOperation
-    request_id: str
-    fingerprint: str
-    result: RunRequestResult
-    created_at: datetime
-
-
-@dataclass(frozen=True, slots=True)
 class SubmitRunCommand:
     """原子提交文本任务所需的数据。"""
 
@@ -710,7 +697,6 @@ __all__ = [
     "RunModelSnapshot",
     "RunQueuedPayload",
     "RecordRunUsageCommand",
-    "RunRequest",
     "RunRequestOperation",
     "RunRequestResult",
     "RequestRunInputCommand",

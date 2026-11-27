@@ -6,9 +6,10 @@ import json
 import unicodedata
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from enum import Enum
-from typing import Any, Literal
+from typing import Any
 from uuid import UUID
+
+from common.unset import UNSET, UnsetType
 
 MAX_TOOL_DESCRIPTION_LENGTH = 8192
 MAX_TOOL_SCHEMA_BYTES = 256 * 1024
@@ -17,16 +18,6 @@ MAX_APPROVAL_SUMMARY_TEMPLATE_LENGTH = 500
 MAX_PARAMETER_LABELS_COUNT = 50
 MAX_PARAMETER_LABEL_KEY_LENGTH = 128
 MAX_PARAMETER_LABEL_VALUE_LENGTH = 120
-
-
-class _ToolFieldUnset(Enum):
-    """工具局部更新中用于区分“未传字段”与显式传入 None 的哨兵枚举。"""
-
-    UNSET = "UNSET"
-
-
-type ToolFieldUnsetType = Literal[_ToolFieldUnset.UNSET]
-TOOL_FIELD_UNSET: ToolFieldUnsetType = _ToolFieldUnset.UNSET
 
 
 def validate_tool_display_name(value: str | None) -> str | None:
@@ -91,15 +82,15 @@ def validate_parameter_labels(value: Mapping[str, str] | None) -> dict[str, str]
 class ToolMetadataPatch:
     """管理员对单个 MCP 工具审批开关与业务展示元信息的局部更新补丁。"""
 
-    requires_approval: bool | ToolFieldUnsetType = TOOL_FIELD_UNSET
-    display_name: str | None | ToolFieldUnsetType = TOOL_FIELD_UNSET
-    approval_summary_template: str | None | ToolFieldUnsetType = TOOL_FIELD_UNSET
-    parameter_labels: Mapping[str, str] | None | ToolFieldUnsetType = TOOL_FIELD_UNSET
+    requires_approval: bool | UnsetType = UNSET
+    display_name: str | None | UnsetType = UNSET
+    approval_summary_template: str | None | UnsetType = UNSET
+    parameter_labels: Mapping[str, str] | None | UnsetType = UNSET
 
     def has_updates(self) -> bool:
         """判断是否至少提供一个更新字段。"""
         return any(
-            item is not TOOL_FIELD_UNSET
+            item is not UNSET
             for item in (
                 self.requires_approval,
                 self.display_name,
@@ -198,7 +189,6 @@ __all__ = [
     "MAX_TOOL_DISPLAY_NAME_LENGTH",
     "MAX_TOOL_SCHEMA_BYTES",
     "PublicToolDefinition",
-    "TOOL_FIELD_UNSET",
     "ToolDefinition",
     "ToolMetadataPatch",
     "validate_approval_summary_template",

@@ -164,17 +164,6 @@ export async function listKnowledgeDocuments(
   };
 }
 
-export async function getKnowledgeDocument(
-  baseId: string,
-  documentId: string,
-): Promise<KnowledgeDocument> {
-  return toKnowledgeDocument(
-    await apiGet("/api/v1/knowledge-bases/{base_id}/documents/{document_id}", {
-      params: { path: { base_id: baseId, document_id: documentId } },
-    }),
-  );
-}
-
 export async function listKnowledgeVersions(
   baseId: string,
   documentId: string,

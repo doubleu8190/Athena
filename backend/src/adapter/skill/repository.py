@@ -24,6 +24,7 @@ from adapter.skill.converter import (
     skill_version_to_domain,
 )
 from adapter.skill.model import SkillExecutionModel, SkillModel, SkillVersionModel
+from common.unset import UNSET, UnsetType
 from domain.access import (
     ResourceType,
     UserAccessSnapshot,
@@ -52,7 +53,7 @@ from domain.skill.model import (
     SkillVersion,
     SkillVersionPage,
 )
-from domain.skill.ports import UNSET, SkillRepository, UnsetType
+from domain.skill.ports import SkillRepository
 
 _PERSONAL_REQUEST_OPERATIONS = frozenset({"personal_create", "personal_publish"})
 _ADMIN_MANAGED_SCOPES = (SkillScope.COMPANY.value, SkillScope.DEPARTMENT.value)

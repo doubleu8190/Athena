@@ -1,3 +1,4 @@
+import { fileExtension } from "../../shared/lib/file";
 import { countCodePoints } from "../../shared/lib/text";
 import { isDeptAdmin, isSuperAdmin, type User } from "../auth/model";
 import type { VisibilityScope } from "../../shared/ui/VisibilityBadge";
@@ -36,9 +37,9 @@ export const KNOWLEDGE_FILE_ACCEPT = [
 ].join(",");
 
 const SUPPORTED_EXTENSIONS = new Set(
-  KNOWLEDGE_FILE_ACCEPT.split(","),
+  KNOWLEDGE_FILE_ACCEPT.split(",").map((item) => item.slice(1)),
 );
-const LEGACY_OFFICE_EXTENSIONS = new Set([".doc", ".xls", ".ppt"]);
+const LEGACY_OFFICE_EXTENSIONS = new Set(["doc", "xls", "ppt"]);
 const CONTROL_CHARACTER_PATTERN = /\p{Cc}/u;
 
 export interface KnowledgeBase {
@@ -308,12 +309,6 @@ export function validateKnowledgeSearchQuery(value: string): string | null {
     return "检索内容不能超过 4,000 个字符。";
   }
   return null;
-}
-
-function fileExtension(filename: string): string {
-  const normalized = filename.trim().toLowerCase();
-  const dot = normalized.lastIndexOf(".");
-  return dot >= 0 ? normalized.slice(dot) : "";
 }
 
 export function validateKnowledgeFile(file: File): string | null {

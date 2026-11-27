@@ -22,7 +22,7 @@ from adapter.run.model import (
     SessionContextSummaryModel,
 )
 from adapter.run.repository._shared import RunRepositorySupportMixin
-from common.ids import now_utc
+from common.date import utc_now
 from domain.message import (
     ConversationMessage,
     ExecutionMessage,
@@ -451,7 +451,7 @@ class RunContextEventsMixin(RunRepositorySupportMixin):
                     or not self._work_deadline_is_valid(row, db_now)
                 ):
                     return None
-                await self._append_event(session, row, payload, db_now or now_utc())
+                await self._append_event(session, row, payload, db_now or utc_now())
                 event_row = await session.scalar(
                     select(RunEventModel).where(
                         RunEventModel.run_id == row.id,

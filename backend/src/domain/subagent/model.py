@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Final
 
+from common.unset import UNSET, UnsetType
 from domain.access import VisibilityGrant, VisibilityGrantInput, VisibilityScope
 from domain.subagent.errors import (
     SubagentSlugReservedError,
@@ -31,15 +32,6 @@ MIN_SUBAGENT_TIMEOUT_SECONDS: Final[int] = 10
 MAX_SUBAGENT_TIMEOUT_SECONDS: Final[int] = 1800
 MAX_SUBAGENT_MODEL_PROFILE_ID_LENGTH: Final[int] = 64
 MAX_SUBAGENT_TOOL_ID_LENGTH: Final[int] = 128
-
-
-class UnsetType:
-    """用于区分 PATCH 请求中未传递字段与显式传递 None 的哨兵类型。"""
-
-    __slots__ = ()
-
-
-UNSET: Final[UnsetType] = UnsetType()
 
 
 def _has_disallowed_control_chars(text: str, *, allow_whitespace_controls: bool) -> bool:
@@ -302,8 +294,6 @@ __all__ = [
     "SubagentPage",
     "SubagentProfile",
     "SubagentUpdatePatch",
-    "UNSET",
-    "UnsetType",
     "UpdateSubagentCommand",
     "validate_subagent_allowed_tool_ids",
     "validate_subagent_description",

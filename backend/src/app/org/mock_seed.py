@@ -5,8 +5,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from datetime import datetime
 
-from common.date import as_utc
-from common.ids import now_utc
+from common.date import as_utc, utc_now
 from domain.auth import AuthProvider, User, UserRole, UserStatus
 from domain.org import (
     MockDepartmentSeed,
@@ -178,7 +177,7 @@ def build_mock_seed_data(
 async def seed_mock_organization(
     org_repository: OrgRepository,
     *,
-    clock: Callable[[], datetime] = now_utc,
+    clock: Callable[[], datetime] = utc_now,
 ) -> None:
     """幂等写入非生产本地 Mock 组织树与 6 个典型角色测试账号。"""
     now = clock()

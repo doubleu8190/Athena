@@ -5,8 +5,8 @@ from __future__ import annotations
 from collections.abc import Callable, Sequence
 from datetime import datetime
 
-from common.date import as_utc
-from common.ids import new_id, now_utc
+from common.date import as_utc, utc_now
+from common.ids import new_id
 from domain.auth import AuthContext
 from domain.org import (
     DepartmentCycleError,
@@ -152,7 +152,7 @@ class FeishuOrgSyncService:
         feishu_client: FeishuDirectoryClient,
         org_repository: OrgRepository,
         *,
-        clock: Callable[[], datetime] = now_utc,
+        clock: Callable[[], datetime] = utc_now,
         department_id_factory: Callable[[], str] | None = None,
         user_id_factory: Callable[[], str] | None = None,
     ) -> None:

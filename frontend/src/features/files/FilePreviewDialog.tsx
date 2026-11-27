@@ -39,6 +39,7 @@ import {
   cn,
   toast,
 } from "../../shared/ui";
+import { fileExtension } from "../../shared/lib/file";
 import { MarkdownContent } from "../../shared/ui/MarkdownContent";
 import { getSessionFileContent } from "./api";
 import {
@@ -50,7 +51,6 @@ import {
 import {
   SESSION_FILE_CONTENT_DEFAULT_LIMIT_BYTES,
   fileDisplayName,
-  fileExtension,
   resolveFilePreviewKind,
   sessionFilePreviewUrl,
   type FilePreviewKind,

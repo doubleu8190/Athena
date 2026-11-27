@@ -1,5 +1,5 @@
+import type { ApiSchemas } from "../../shared/api/client";
 import { countCodePoints } from "../../shared/lib/text";
-import type { VisibilityGrant } from "../knowledge/model";
 
 export const MODEL_PROFILE_NAME_MAX_LENGTH = 120;
 export const MODEL_BASE_URL_MAX_LENGTH = 2_048;
@@ -13,204 +13,49 @@ export const MCP_SERVER_NAME_MAX_LENGTH = 120;
 export const MCP_SECRET_MAX_BYTES = 16 * 1024;
 export const SYSTEM_PROMPT_CONTENT_MAX_LENGTH = 100_000;
 
-export const TOKENIZER_ENCODINGS = [
+// 直连 OpenAPI 管理端模型配置、压缩策略、MCP、工具、系统提示词与组织部门契约。
+export type ModelProfile = ApiSchemas["ModelProfileResponse"];
+export type TokenizerEncoding = ModelProfile["tokenizer_encoding"];
+export const TOKENIZER_ENCODINGS: readonly TokenizerEncoding[] = [
   "o200k_base",
   "cl100k_base",
 ] as const;
 
-export type TokenizerEncoding = (typeof TOKENIZER_ENCODINGS)[number];
-export type McpTransport = "streamable_http" | "stdio";
-export type SystemPromptKind = "main" | "compression";
+export type McpServer = ApiSchemas["McpServerResponse"];
+export type McpTransport = McpServer["transport"];
+export type SystemPromptKind = ApiSchemas["SystemPromptKind"];
+export type SystemPromptVersion = ApiSchemas["SystemPromptVersionResponse"];
+export type SystemPromptVersionSummary =
+  ApiSchemas["SystemPromptVersionSummary"];
+export type SystemPromptVersionListResponse =
+  ApiSchemas["SystemPromptVersionListResponse"];
+export type OrgDepartment = ApiSchemas["DepartmentResponse"];
+export type OrgDepartmentListResponse = ApiSchemas["DepartmentListResponse"];
+export type ModelProfileListResponse = ApiSchemas["ModelProfileListResponse"];
+export type ModelProfileCreateInput = ApiSchemas["ModelProfileCreateRequest"];
+export type CompressionPolicy = ApiSchemas["CompressionPolicyResponse"];
+export type CompressionPolicyInput = ApiSchemas["CompressionPolicyRequest"];
+export type McpSecretMetadata = ApiSchemas["McpSecretMetadataResponse"];
+export type McpHttpConfig = ApiSchemas["McpHttpConfigResponse"];
+export type McpStdioConfig = ApiSchemas["McpStdioConfigResponse"];
+export type McpServerListResponse = ApiSchemas["McpServerListResponse"];
+export type AdminTool = ApiSchemas["AdminToolResponse"];
+export type AdminToolListResponse = ApiSchemas["AdminToolListResponse"];
 
-export interface SystemPromptVersion {
-  id: string;
-  kind: SystemPromptKind;
-  content: string;
-  created_by: string | null;
-  created_at: string;
-  restored_from_version_id: string | null;
-}
-
-export interface SystemPromptVersionSummary {
-  id: string;
-  kind: SystemPromptKind;
-  created_by: string | null;
-  created_at: string;
-  restored_from_version_id: string | null;
-}
-
-export interface SystemPromptVersionListResponse {
-  items: SystemPromptVersionSummary[];
-  page: number;
-  page_size: number;
-  total: number;
-}
-
-export interface OrgDepartment {
-  created_at: string;
-  external_id: string | null;
-  id: string;
-  name: string;
-  order_index: number;
-  parent_id: string | null;
-  path: string;
-  status: "active" | "archived";
-  synced_at: string | null;
-  updated_at: string;
-}
-
-export interface OrgDepartmentListResponse {
-  items: OrgDepartment[];
-}
-
-export interface ModelProfile {
-  id: string;
-  name: string;
-  protocol: string;
-  base_url: string;
-  model: string;
-  context_window_tokens: number;
-  tokenizer_encoding: TokenizerEncoding;
-  supports_stream: boolean;
-  supports_tools: boolean;
-  supports_parallel_tool_calls: boolean;
-  max_output_tokens: number;
-  request_timeout_seconds: number;
-  execution_timeout_seconds: number;
-  max_concurrency: number;
-  temperature: number | null;
-  enabled: boolean;
-  created_at: string;
-  visible_to_users: boolean;
-  scenario_label: string | null;
-  scenario_description: string | null;
-  supports_vision: boolean;
-  version: number;
-  updated_at: string;
-}
-
-export interface ModelProfileListResponse {
-  items: ModelProfile[];
-  default_profile_id: string | null;
-}
-
-export interface ModelProfileCreateInput {
-  name: string;
-  base_url: string;
-  model: string;
-  api_key: string;
-  context_window_tokens: number;
-  tokenizer_encoding: TokenizerEncoding;
-  supports_stream: boolean;
-  supports_tools: boolean;
-  supports_parallel_tool_calls: boolean;
-  max_output_tokens: number;
-  request_timeout_seconds: number;
-  execution_timeout_seconds: number;
-  max_concurrency: number;
-  temperature: number | null;
-}
-
-export interface CompressionPolicy {
-  id: string | null;
-  compression_model_profile_id: string | null;
-  trigger_tokens: number | null;
-  recent_ratio: number | null;
-  recent_token_cap: number | null;
-  summary_ratio: number | null;
-  summary_token_cap: number | null;
-  created_at: string | null;
-}
-
-export interface CompressionPolicyInput {
-  compression_model_profile_id: string;
-  trigger_tokens: number;
-  recent_ratio: number;
-  recent_token_cap: number;
-  summary_ratio: number;
-  summary_token_cap: number;
-}
-
-export interface McpSecretMetadata {
-  name: string;
-  has_value: boolean;
-}
-
-export interface McpHttpConfig {
-  url: string;
-}
-
-export interface McpStdioConfig {
-  command: string;
-  args: string[];
-  cwd: string | null;
-}
-
-export interface McpServer {
-  id: string;
-  name: string;
-  transport: McpTransport;
-  config: McpHttpConfig | McpStdioConfig;
-  secrets: McpSecretMetadata[];
-  config_version: number;
-  created_by: string | null;
-  created_at: string;
-  updated_at: string;
-  tools_discovered_at: string | null;
-  enabled: boolean;
-  visibility_scope: "company" | "department";
-  owner_department_id: string | null;
-  visibility_grants: VisibilityGrant[];
-}
-
-export interface McpServerListResponse {
-  items: McpServer[];
-  total: number;
-  page: number;
-  page_size: number;
-}
-
-export interface McpHttpWriteInput {
-  name: string;
-  transport: "streamable_http";
-  url: string;
-  secrets: Record<string, string>;
-}
-
-export interface McpStdioWriteInput {
-  name: string;
-  transport: "stdio";
-  command: string;
-  args: string[];
-  cwd: string | null;
-  secrets: Record<string, string>;
-}
-
+// 判别联合写入类型：基于 UpdateRequest 去除乐观锁版本，确保 secrets 必填以同时满足注册与全量更新契约。
+export type McpHttpWriteInput = Omit<
+  ApiSchemas["HttpServerUpdateRequest"],
+  "expected_config_version"
+>;
+export type McpStdioWriteInput = Omit<
+  ApiSchemas["StdioServerUpdateRequest"],
+  "expected_config_version"
+>;
 export type McpServerWriteInput = McpHttpWriteInput | McpStdioWriteInput;
 
 export interface McpServerUpdateInput {
   expected_config_version: number;
   server: McpServerWriteInput;
-}
-
-export interface AdminTool {
-  tool_id: string;
-  model_name: string;
-  description: string;
-  input_schema: Record<string, unknown>;
-  server_id: string;
-  remote_name: string;
-  requires_approval: boolean;
-  display_name: string | null;
-  approval_summary_template: string | null;
-  parameter_labels: Record<string, string>;
-}
-
-export interface AdminToolListResponse {
-  items: AdminTool[];
-  total: number;
-  page: number;
-  page_size: number;
 }
 
 export interface AdminPageQuery {
@@ -803,13 +648,14 @@ export function mcpServerForm(server?: McpServer): McpServerFormValues {
       secrets: [],
     };
   }
+  // 按传输方式与结构键收窄联合配置，避免不安全类型断言。
   const httpConfig =
-    server.transport === "streamable_http"
-      ? (server.config as McpHttpConfig)
+    server.transport === "streamable_http" && "url" in server.config
+      ? server.config
       : null;
   const stdioConfig =
-    server.transport === "stdio"
-      ? (server.config as McpStdioConfig)
+    server.transport === "stdio" && "command" in server.config
+      ? server.config
       : null;
   return {
     name: server.name,
@@ -837,76 +683,16 @@ export function modelCanBeDefault(profile: ModelProfile): boolean {
 
 // ---------------- Subagent 管理模型与表单校验 ----------------
 
-export interface SubagentProfile {
-  id: string;
-  slug: string;
-  name: string;
-  description: string;
-  system_prompt: string;
-  model_profile_id: string | null;
-  allowed_tool_ids: string[];
-  enabled: boolean;
-  max_llm_requests: number | null;
-  timeout_seconds: number | null;
-  version: number;
-  created_by: string | null;
-  created_at: string;
-  updated_at: string;
-  visibility_scope: "company" | "department";
-  owner_department_id: string | null;
-  visibility_grants: VisibilityGrant[];
-}
-
-export interface SubagentListResponse {
-  items: SubagentProfile[];
-  total: number;
-  offset: number;
-  limit: number;
-}
-
-export interface SubagentCreateInput {
-  slug: string;
-  name: string;
-  description: string;
-  system_prompt: string;
-  model_profile_id: string | null;
-  allowed_tool_ids: string[];
-  enabled: boolean;
-  max_llm_requests: number | null;
-  timeout_seconds: number | null;
-}
-
-export interface SubagentUpdateInput {
-  version: number;
-  slug?: string;
-  name?: string;
-  description?: string;
-  system_prompt?: string;
-  model_profile_id?: string | null;
-  allowed_tool_ids?: string[];
-  max_llm_requests?: number | null;
-  timeout_seconds?: number | null;
-}
-
-export interface SubagentAvailableToolItem {
-  tool_id: string;
-  name: string;
-  description: string;
-  source_type: string;
-  requires_approval: boolean;
-  server_id: string | null;
-  server_name: string | null;
-}
-
-export interface SubagentAvailableToolGroup {
-  group_key: string;
-  label: string;
-  items: SubagentAvailableToolItem[];
-}
-
-export interface SubagentAvailableToolsResponse {
-  groups: SubagentAvailableToolGroup[];
-}
+// 直连 OpenAPI Subagent 管理与可用工具目录契约。
+export type SubagentProfile = ApiSchemas["SubagentResponse"];
+export type SubagentListResponse = ApiSchemas["SubagentListResponse"];
+export type SubagentCreateInput = ApiSchemas["SubagentCreateRequest"];
+export type SubagentUpdateInput = ApiSchemas["SubagentUpdateRequest"];
+export type SubagentAvailableToolItem = ApiSchemas["AvailableToolItemResponse"];
+export type SubagentAvailableToolGroup =
+  ApiSchemas["AvailableToolGroupResponse"];
+export type SubagentAvailableToolsResponse =
+  ApiSchemas["SubagentAvailableToolsResponse"];
 
 export interface SubagentFormValues {
   slug: string;

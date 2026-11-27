@@ -2,34 +2,45 @@
 
 from __future__ import annotations
 
-from typing import Any, Literal, cast
+from typing import Literal, cast
 
 from api.dto.access import grants_to_response
-from api.dto.mcp import McpServerListResponse, McpServerResponse
+from api.dto.mcp import (
+    McpHttpConfigResponse,
+    McpSecretMetadataResponse,
+    McpServerListResponse,
+    McpServerResponse,
+    McpStdioConfigResponse,
+)
 from domain.mcp import McpServer, McpServerPage, StdioConfig, StreamableHttpConfig
 
 
 def mcp_server_to_response(server: McpServer) -> McpServerResponse:
     """转换脱敏 Server 投影，不读取或恢复秘密值。"""
-    config: dict[str, Any]
+    # 按连接配置具体类型构造具名响应 DTO，确保 JSON 键名、null 与空数组表现与历史完全一致。
+    transport: Literal["streamable_http", "stdio"]
+    config: McpHttpConfigResponse | McpStdioConfigResponse
     if isinstance(server.config, StreamableHttpConfig):
-        config = {"url": server.config.url}
+        transport = "streamable_http"
+        config = McpHttpConfigResponse(url=server.config.url)
     elif isinstance(server.config, StdioConfig):
-        config = {
-            "command": server.config.command,
-            "args": list(server.config.args),
-            "cwd": server.config.cwd,
-        }
+        transport = "stdio"
+        config = McpStdioConfigResponse(
+            command=server.config.command,
+            args=list(server.config.args),
+            cwd=server.config.cwd,
+        )
     else:
         raise ValueError("mcp_config_invalid")
     scope = cast(Literal["company", "department"], server.visibility_scope.value)
     return McpServerResponse(
         id=server.id,
         name=server.name,
-        transport=server.transport.value,
+        transport=transport,
         config=config,
         secrets=[
-            {"name": entry.name, "has_value": entry.has_value} for entry in server.secret_metadata
+            McpSecretMetadataResponse(name=entry.name, has_value=entry.has_value)
+            for entry in server.secret_metadata
         ],
         config_version=server.config_version,
         enabled=server.enabled,

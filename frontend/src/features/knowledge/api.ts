@@ -6,7 +6,6 @@ import {
   apiPatch,
   apiPost,
   apiPut,
-  type ApiSchemas,
   type DownloadedFile,
 } from "../../shared/api/client";
 import type {
@@ -17,7 +16,6 @@ import type {
   KnowledgeDocument,
   KnowledgeDocumentListQuery,
   KnowledgeDocumentListResponse,
-  KnowledgeDocumentState,
   KnowledgeImportResponse,
   KnowledgeListQuery,
   KnowledgeSearchHit,
@@ -35,39 +33,6 @@ function documentPath(baseId: string, documentId: string): string {
 
 function idempotencyHeaders(key: string): HeadersInit {
   return { "Idempotency-Key": key };
-}
-
-function toKnowledgeDocumentState(value: string): KnowledgeDocumentState {
-  if (
-    value === "queued" ||
-    value === "processing" ||
-    value === "ready" ||
-    value === "failed"
-  ) {
-    return value;
-  }
-  return "failed";
-}
-
-function toKnowledgeVersion(
-  raw: ApiSchemas["KnowledgeVersionResponse"],
-): KnowledgeVersion {
-  return {
-    ...raw,
-    state: toKnowledgeDocumentState(raw.state),
-  };
-}
-
-function toKnowledgeDocument(
-  raw: ApiSchemas["KnowledgeDocumentResponse"],
-): KnowledgeDocument {
-  return {
-    ...raw,
-    latest_version:
-      raw.latest_version === null
-        ? null
-        : toKnowledgeVersion(raw.latest_version),
-  };
 }
 
 export function listKnowledgeBases(
@@ -141,7 +106,7 @@ export function deleteKnowledgeBase(baseId: string): Promise<void> {
   });
 }
 
-export async function listKnowledgeDocuments(
+export function listKnowledgeDocuments(
   baseId: string,
   query: KnowledgeDocumentListQuery = {},
 ): Promise<KnowledgeDocumentListResponse> {
@@ -152,29 +117,24 @@ export async function listKnowledgeDocuments(
   if (query.pageSize !== undefined) {
     queryParams.page_size = query.pageSize;
   }
-  const response = await apiGet("/api/v1/knowledge-bases/{base_id}/documents", {
+  return apiGet("/api/v1/knowledge-bases/{base_id}/documents", {
     params: {
       path: { base_id: baseId },
       query: queryParams,
     },
   });
-  return {
-    ...response,
-    items: response.items.map(toKnowledgeDocument),
-  };
 }
 
-export async function listKnowledgeVersions(
+export function listKnowledgeVersions(
   baseId: string,
   documentId: string,
 ): Promise<KnowledgeVersion[]> {
-  const response = await apiGet(
+  return apiGet(
     "/api/v1/knowledge-bases/{base_id}/documents/{document_id}/versions",
     {
       params: { path: { base_id: baseId, document_id: documentId } },
     },
   );
-  return response.map(toKnowledgeVersion);
 }
 
 export function importKnowledgeText(
@@ -201,7 +161,7 @@ export function uploadKnowledgeDocument(
   const form = new FormData();
   form.set("title", title);
   form.set("file", file);
-  return apiMultipart<ApiSchemas["KnowledgeImportResponse"]>(
+  return apiMultipart<KnowledgeImportResponse>(
     `${basePath(baseId)}/documents/upload`,
     form,
     { method: "POST", headers: idempotencyHeaders(idempotencyKey) },
@@ -235,27 +195,22 @@ export function replaceKnowledgeFile(
 ): Promise<KnowledgeImportResponse> {
   const form = new FormData();
   form.set("file", file);
-  return apiMultipart<ApiSchemas["KnowledgeImportResponse"]>(
+  return apiMultipart<KnowledgeImportResponse>(
     `${documentPath(baseId, documentId)}/versions/upload`,
     form,
     { method: "POST", headers: idempotencyHeaders(idempotencyKey) },
   );
 }
 
-export async function renameKnowledgeDocument(
+export function renameKnowledgeDocument(
   baseId: string,
   documentId: string,
   title: string,
 ): Promise<KnowledgeDocument> {
-  return toKnowledgeDocument(
-    await apiPatch(
-      "/api/v1/knowledge-bases/{base_id}/documents/{document_id}",
-      {
-        body: { title },
-        params: { path: { base_id: baseId, document_id: documentId } },
-      },
-    ),
-  );
+  return apiPatch("/api/v1/knowledge-bases/{base_id}/documents/{document_id}", {
+    body: { title },
+    params: { path: { base_id: baseId, document_id: documentId } },
+  });
 }
 
 export function deleteKnowledgeDocument(
@@ -270,24 +225,22 @@ export function deleteKnowledgeDocument(
   );
 }
 
-export async function retryKnowledgeVersion(
+export function retryKnowledgeVersion(
   baseId: string,
   documentId: string,
   versionId: string,
 ): Promise<KnowledgeVersion> {
-  return toKnowledgeVersion(
-    await apiPost(
-      "/api/v1/knowledge-bases/{base_id}/documents/{document_id}/versions/{version_id}/retry",
-      {
-        params: {
-          path: {
-            base_id: baseId,
-            document_id: documentId,
-            version_id: versionId,
-          },
+  return apiPost(
+    "/api/v1/knowledge-bases/{base_id}/documents/{document_id}/versions/{version_id}/retry",
+    {
+      params: {
+        path: {
+          base_id: baseId,
+          document_id: documentId,
+          version_id: versionId,
         },
       },
-    ),
+    },
   );
 }
 

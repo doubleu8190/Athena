@@ -64,7 +64,7 @@ def knowledge_version_to_response(item: DocumentVersion) -> KnowledgeVersionResp
     return KnowledgeVersionResponse(
         id=item.id,
         document_id=item.document_id,
-        state=item.state.value,
+        state=item.state,
         error_code=item.error_code,
         warnings=list(item.warnings),
         chunk_count=item.chunk_count,

@@ -1,20 +1,29 @@
+import type { ApiSchemas } from "../../shared/api/client";
 import { fileExtension } from "../../shared/lib/file";
 import { countCodePoints } from "../../shared/lib/text";
 import { isDeptAdmin, isSuperAdmin, type User } from "../auth/model";
 import type { VisibilityScope } from "../../shared/ui/VisibilityBadge";
 
-export type VisibilityGrantTargetType = "department" | "role";
-
-export interface VisibilityGrantInput {
-  include_subdepartments: boolean;
-  target_id: string;
-  target_type: VisibilityGrantTargetType;
-}
-
-export interface VisibilityGrant extends VisibilityGrantInput {
-  created_at: string;
-  id: string;
-}
+// 直连 OpenAPI 知识库与可见性授权契约；表单编辑器要求 include_subdepartments 显式为布尔值。
+export type VisibilityGrant = ApiSchemas["VisibilityGrantResponse"];
+export type VisibilityGrantTargetType = VisibilityGrant["target_type"];
+export type VisibilityGrantInput = Required<
+  ApiSchemas["VisibilityGrantRequest"]
+>;
+export type KnowledgeBase = ApiSchemas["KnowledgeBaseResponse"];
+export type KnowledgeBaseListResponse = ApiSchemas["KnowledgeBaseListResponse"];
+export type KnowledgeBaseInput = ApiSchemas["KnowledgeBaseRequest"];
+export type KnowledgeBasePatch = ApiSchemas["KnowledgeBasePatchRequest"];
+export type KnowledgeDocumentState = ApiSchemas["DocumentState"];
+export type KnowledgeDocument = ApiSchemas["KnowledgeDocumentResponse"];
+export type KnowledgeDocumentListResponse =
+  ApiSchemas["KnowledgeDocumentListResponse"];
+export type KnowledgeVersion = ApiSchemas["KnowledgeVersionResponse"];
+export type KnowledgeImportResponse = ApiSchemas["KnowledgeImportResponse"];
+export type KnowledgeSearchHit = ApiSchemas["KnowledgeSearchHit"];
+export type KnowledgeLocator = KnowledgeSearchHit["locators"][number];
+export type KnowledgeSearchResponse = ApiSchemas["KnowledgeSearchResponse"];
+export type KnowledgeTextInput = ApiSchemas["KnowledgeTextRequest"];
 
 export const KNOWLEDGE_BASE_NAME_MAX_LENGTH = 120;
 export const KNOWLEDGE_DESCRIPTION_MAX_LENGTH = 500;
@@ -41,17 +50,6 @@ const SUPPORTED_EXTENSIONS = new Set(
 );
 const LEGACY_OFFICE_EXTENSIONS = new Set(["doc", "xls", "ppt"]);
 const CONTROL_CHARACTER_PATTERN = /\p{Cc}/u;
-
-export interface KnowledgeBase {
-  id: string;
-  name: string;
-  description: string | null;
-  visibility_scope: VisibilityScope;
-  owner_department_id: string | null;
-  visibility_grants: VisibilityGrant[];
-  created_at: string;
-  updated_at: string;
-}
 
 /**
  * 判断当前登录用户是否拥有目标知识库的管理写权限（编辑、删除、资料上传与版本变更）：
@@ -122,12 +120,6 @@ export function countExtraVisibilityGrants(
   return count;
 }
 
-export interface KnowledgeBaseListResponse {
-  items: KnowledgeBase[];
-  page: number;
-  page_size: number;
-}
-
 export interface KnowledgeListQuery {
   ownerDepartmentId?: string;
   page?: number;
@@ -135,93 +127,9 @@ export interface KnowledgeListQuery {
   visibilityScope?: VisibilityScope;
 }
 
-export interface KnowledgeBaseInput {
-  description?: string;
-  name: string;
-  owner_department_id?: string | null;
-  visibility_grants?: VisibilityGrantInput[];
-  visibility_scope?: VisibilityScope;
-}
-
-export interface KnowledgeBasePatch {
-  description?: string;
-  name?: string;
-  owner_department_id?: string | null;
-  visibility_grants?: VisibilityGrantInput[];
-  visibility_scope?: VisibilityScope;
-}
-
-export type KnowledgeDocumentState =
-  | "queued"
-  | "processing"
-  | "ready"
-  | "failed";
-
-export interface KnowledgeDocument {
-  id: string;
-  knowledge_base_id: string;
-  title: string;
-  active_version_id: string | null;
-  pending_version_id: string | null;
-  /** 文档列表与详情接口始终附带的最新版本摘要；尚无版本记录时为 null。 */
-  latest_version: KnowledgeVersion | null;
-  created_at: string;
-  updated_at: string;
-}
-
-export interface KnowledgeDocumentListResponse {
-  items: KnowledgeDocument[];
-  page: number;
-  page_size: number;
-}
-
 export interface KnowledgeDocumentListQuery {
   page?: number;
   pageSize?: number;
-}
-
-export interface KnowledgeVersion {
-  id: string;
-  document_id: string;
-  state: KnowledgeDocumentState;
-  error_code: string | null;
-  warnings: string[];
-  chunk_count: number;
-  created_at: string;
-  completed_at: string | null;
-}
-
-export interface KnowledgeImportResponse {
-  document_id: string;
-  version_id: string;
-  state: string;
-  status_url: string;
-}
-
-export interface KnowledgeLocator {
-  [key: string]: unknown;
-}
-
-export interface KnowledgeSearchHit {
-  chunk_id: string;
-  chunk_ids: string[];
-  document_id: string;
-  version_id: string;
-  title: string;
-  text: string;
-  locators: KnowledgeLocator[];
-  channels: string[];
-}
-
-export interface KnowledgeSearchResponse {
-  hits: KnowledgeSearchHit[];
-  channels: string[];
-  degraded_reasons: string[];
-}
-
-export interface KnowledgeTextInput {
-  title: string;
-  text: string;
 }
 
 export function countUnicodeCodePoints(value: string): number {

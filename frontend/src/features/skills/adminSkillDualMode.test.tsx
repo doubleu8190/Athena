@@ -41,7 +41,7 @@ function versionListResponse(
 const ORG_DEPARTMENTS: OrgDepartment[] = [
   {
     created_at: "2026-10-01T00:00:00Z",
-    external_id: null,
+    external_id: "ext-fin",
     id: "dept-fin",
     name: "财务部",
     order_index: 1,
@@ -53,7 +53,7 @@ const ORG_DEPARTMENTS: OrgDepartment[] = [
   },
   {
     created_at: "2026-10-01T00:00:00Z",
-    external_id: null,
+    external_id: "ext-ops",
     id: "dept-ops",
     name: "运营部",
     order_index: 2,
@@ -65,7 +65,7 @@ const ORG_DEPARTMENTS: OrgDepartment[] = [
   },
   {
     created_at: "2026-10-01T00:00:00Z",
-    external_id: null,
+    external_id: "ext-archived",
     id: "dept-archived",
     name: "已归档旧部",
     order_index: 3,

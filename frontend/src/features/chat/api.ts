@@ -1,77 +1,13 @@
 import { apiGet, apiPost, type ApiSchemas } from "../../shared/api/client";
-import type { SkillScope } from "../skills/model";
 import type {
   ConversationMessagePage,
   Run,
   RunListResponse,
-  RunSkillSnapshot,
-  RunStatus,
   RunToolCallDetail,
   RunToolCallListResponse,
-  SubagentTaskSummary,
 } from "./model";
 
 const API_PREFIX = "/api/v1";
-
-function toRunStatus(value: string): RunStatus {
-  switch (value) {
-    case "queued":
-    case "running":
-    case "waiting_for_input":
-    case "waiting_for_approval":
-    case "waiting_for_subagents":
-    case "cancelling":
-    case "completed":
-    case "failed":
-    case "cancelled":
-      return value;
-    default:
-      return "failed";
-  }
-}
-
-function toSkillScope(value: string): SkillScope {
-  if (
-    value === "company" ||
-    value === "department" ||
-    value === "personal"
-  ) {
-    return value;
-  }
-  return "company";
-}
-
-function toRunSkillSnapshot(
-  raw: ApiSchemas["RunSkillSnapshotResponse"],
-): RunSkillSnapshot {
-  return {
-    ...raw,
-    skills: raw.skills.map((entry) => ({
-      ...entry,
-      scope: toSkillScope(entry.scope),
-    })),
-  };
-}
-
-function toSubagentTaskSummary(
-  raw: ApiSchemas["SubagentTaskResponse"],
-): SubagentTaskSummary {
-  return {
-    ...raw,
-    status: toRunStatus(raw.status),
-  };
-}
-
-function toRun(raw: ApiSchemas["RunResponse"]): Run {
-  return {
-    ...raw,
-    skill_snapshot: raw.skill_snapshot
-      ? toRunSkillSnapshot(raw.skill_snapshot)
-      : null,
-    status: toRunStatus(raw.status),
-    subagent_tasks: raw.subagent_tasks.map(toSubagentTaskSummary),
-  };
-}
 
 export function listMessages(
   sessionId: string,
@@ -90,28 +26,22 @@ export function listMessages(
   });
 }
 
-export async function listRuns(
+export function listRuns(
   sessionId: string,
   limit = 1,
 ): Promise<RunListResponse> {
-  const response = await apiGet("/api/v1/sessions/{session_id}/runs", {
+  return apiGet("/api/v1/sessions/{session_id}/runs", {
     params: {
       path: { session_id: sessionId },
       query: { limit },
     },
   });
-  return {
-    items: response.items.map(toRun),
-    next_cursor: response.next_cursor,
-  };
 }
 
-export async function getRun(sessionId: string, runId: string): Promise<Run> {
-  return toRun(
-    await apiGet("/api/v1/sessions/{session_id}/runs/{run_id}", {
-      params: { path: { run_id: runId, session_id: sessionId } },
-    }),
-  );
+export function getRun(sessionId: string, runId: string): Promise<Run> {
+  return apiGet("/api/v1/sessions/{session_id}/runs/{run_id}", {
+    params: { path: { run_id: runId, session_id: sessionId } },
+  });
 }
 
 export interface SubmitRunOptions {
@@ -126,7 +56,7 @@ export interface SubmitRunOptions {
   modelProfileId?: string | null;
 }
 
-export async function submitRun(
+export function submitRun(
   sessionId: string,
   requestId: string,
   text: string,
@@ -155,42 +85,33 @@ export async function submitRun(
   ) {
     body.model_profile_id = options.modelProfileId;
   }
-  return toRun(
-    await apiPost("/api/v1/sessions/{session_id}/runs", {
-      body,
-      params: { path: { session_id: sessionId } },
-    }),
-  );
+  return apiPost("/api/v1/sessions/{session_id}/runs", {
+    body,
+    params: { path: { session_id: sessionId } },
+  });
 }
 
-export async function cancelRun(
-  sessionId: string,
-  runId: string,
-): Promise<Run> {
-  return toRun(
-    await apiPost("/api/v1/sessions/{session_id}/runs/{run_id}/cancel", {
-      params: { path: { run_id: runId, session_id: sessionId } },
-    }),
-  );
+export function cancelRun(sessionId: string, runId: string): Promise<Run> {
+  return apiPost("/api/v1/sessions/{session_id}/runs/{run_id}/cancel", {
+    params: { path: { run_id: runId, session_id: sessionId } },
+  });
 }
 
-export async function retryRun(
+export function retryRun(
   sessionId: string,
   runId: string,
   requestId: string,
 ): Promise<Run> {
-  return toRun(
-    await apiPost("/api/v1/sessions/{session_id}/runs/{run_id}/retry", {
-      body: {
-        confirm_unknown: true,
-        request_id: requestId,
-      },
-      params: { path: { run_id: runId, session_id: sessionId } },
-    }),
-  );
+  return apiPost("/api/v1/sessions/{session_id}/runs/{run_id}/retry", {
+    body: {
+      confirm_unknown: true,
+      request_id: requestId,
+    },
+    params: { path: { run_id: runId, session_id: sessionId } },
+  });
 }
 
-export async function answerRunInput(
+export function answerRunInput(
   sessionId: string,
   runId: string,
   inputRequestId: string,
@@ -198,44 +119,40 @@ export async function answerRunInput(
   text: string,
   inputFileIds: string[] = [],
 ): Promise<Run> {
-  return toRun(
-    await apiPost(
-      "/api/v1/sessions/{session_id}/runs/{run_id}/input-requests/{input_request_id}/answer",
-      {
-        body: {
-          input_file_ids: inputFileIds,
-          request_id: requestId,
-          text,
-        },
-        params: {
-          path: {
-            input_request_id: inputRequestId,
-            run_id: runId,
-            session_id: sessionId,
-          },
+  return apiPost(
+    "/api/v1/sessions/{session_id}/runs/{run_id}/input-requests/{input_request_id}/answer",
+    {
+      body: {
+        input_file_ids: inputFileIds,
+        request_id: requestId,
+        text,
+      },
+      params: {
+        path: {
+          input_request_id: inputRequestId,
+          run_id: runId,
+          session_id: sessionId,
         },
       },
-    ),
+    },
   );
 }
 
-export async function decideRunToolApproval(
+export function decideRunToolApproval(
   sessionId: string,
   runId: string,
   callId: string,
   requestId: string,
   decision: "approve" | "reject",
 ): Promise<Run> {
-  return toRun(
-    await apiPost(
-      "/api/v1/sessions/{session_id}/runs/{run_id}/tool-calls/{call_id}/approval",
-      {
-        body: { decision, request_id: requestId },
-        params: {
-          path: { call_id: callId, run_id: runId, session_id: sessionId },
-        },
+  return apiPost(
+    "/api/v1/sessions/{session_id}/runs/{run_id}/tool-calls/{call_id}/approval",
+    {
+      body: { decision, request_id: requestId },
+      params: {
+        path: { call_id: callId, run_id: runId, session_id: sessionId },
       },
-    ),
+    },
   );
 }
 

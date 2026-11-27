@@ -7,11 +7,14 @@ from typing import Literal
 
 from pydantic import BaseModel
 
+from domain.file import SessionFileSource
+
 
 class SessionFileResponse(BaseModel):
     id: str
     session_id: str
-    source: str
+    # 复用领域 SessionFileSource 枚举，收紧为封闭文件来源集合。
+    source: SessionFileSource
     filename: str
     label: str | None
     mime_type: str

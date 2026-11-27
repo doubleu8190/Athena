@@ -23,6 +23,7 @@ import {
 import { jsonResponse, renderApp } from "../../test/testUtils";
 import type {
   Run,
+  RunPendingApproval,
   RunToolCallDetail,
   RunToolCallSummary,
   SafeSkillApprovalProjection,
@@ -693,7 +694,7 @@ describe("聊天技能选择与会话文件", () => {
 
 describe("安全技能审批与多文件交付", () => {
   it("审批和执行详情只展示服务端安全投影，并可下载多文件产物", async () => {
-    const pending = {
+    const pending: RunPendingApproval = {
       approval_summary: null,
       batch_message_id: "batch-skill",
       call_id: "call-skill",

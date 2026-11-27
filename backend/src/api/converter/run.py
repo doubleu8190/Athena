@@ -50,6 +50,7 @@ from domain.tool import (
     RunToolCallDetails,
     RunToolCallPage,
     RunToolCallRecord,
+    ToolKind,
 )
 
 RETRY_WARNING = "整个任务将从头执行，可能重复此前已成功的操作；原操作结果未知时也可能已生效。"
@@ -111,7 +112,7 @@ def _input_to_response(request: RunInputRequest) -> RunInputRequestResponse:
     return RunInputRequestResponse(
         id=request.id,
         question_message_id=request.question_message_id,
-        status=request.status.value,
+        status=request.status,
         created_at=request.created_at,
     )
 
@@ -167,7 +168,7 @@ def run_to_response(
     return RunResponse(
         id=run.id,
         session_id=run.session_id,
-        status=run.status.value,
+        status=run.status,
         trigger_message_id=run.trigger_message_id,
         context_cutoff_sequence=run.context_cutoff_sequence,
         retry_of_run_id=run.retry_of_run_id,
@@ -225,7 +226,7 @@ def run_to_response(
                 batch_message_id=item.batch_message_id,
                 ordinal=item.ordinal,
                 model_name=item.model_name,
-                tool_kind=None if item.tool_kind is None else item.tool_kind.value,
+                tool_kind=item.tool_kind,
                 requested_at=item.requested_at,
                 safe_skill_projection=(
                     None
@@ -261,7 +262,7 @@ def run_to_response(
                 subagent_name=item.subagent_name,
                 task_index=item.task_index,
                 task_summary=item.task_summary,
-                status=item.status.value,
+                status=item.status,
                 safe_error_code=item.safe_error_code,
                 created_at=item.created_at,
                 first_started_at=item.first_started_at,
@@ -294,7 +295,8 @@ def run_to_response(
                 batch_message_id=item.batch_message_id,
                 ordinal=item.ordinal,
                 model_name=item.model_name,
-                tool_kind=item.tool_kind,
+                # 领域 PendingSubagentApproval.tool_kind 为原始字符串，在 API 边界收紧为 ToolKind。
+                tool_kind=None if item.tool_kind is None else ToolKind(item.tool_kind),
                 requested_at=item.requested_at,
                 safe_skill_projection=(
                     None
@@ -317,7 +319,7 @@ def run_to_response(
         input_interactions=[
             RunInputInteractionResponse(
                 input_request_id=item.input_request_id,
-                status=item.status.value,
+                status=item.status,
                 question_text=item.question_text,
                 answer_text=item.answer_text,
                 created_at=item.created_at,
@@ -383,9 +385,9 @@ def tool_call_summary_to_response(record: RunToolCallRecord) -> RunToolCallSumma
         tool_call_id=record.tool_call_id,
         ordinal=record.ordinal,
         tool_id=record.tool_id,
-        tool_kind=None if record.tool_kind is None else record.tool_kind.value,
+        tool_kind=record.tool_kind,
         model_name=record.model_name,
-        status=record.status.value,
+        status=record.status,
         started_at=record.started_at,
         finished_at=record.finished_at,
         duration_ms=duration_ms,
@@ -418,7 +420,7 @@ def tool_call_to_response(details: RunToolCallDetails) -> RunToolCallDetailRespo
             None
             if outcome is None
             else RunToolOutcomeResponse(
-                status=outcome.status.value,
+                status=outcome.status,
                 code=outcome.code,
                 message=outcome.message,
                 data={} if is_skill_call else outcome.data,

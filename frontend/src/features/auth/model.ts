@@ -1,56 +1,14 @@
-export type UserRole = "super_admin" | "dept_admin" | "member";
+import type { ApiSchemas } from "../../shared/api/client";
 
-export type AuthProvider = "local" | "feishu" | "mock";
-
-export interface UserDepartment {
-  id: string;
-  name: string;
-  path: string;
-  is_primary: boolean;
-}
-
-export interface User {
-  id: string;
-  /** 飞书同步账号可能无企业邮箱，界面展示时必须安全判空。 */
-  email: string | null;
-  display_name: string | null;
-  created_at: string;
-  role: UserRole;
-  auth_provider: AuthProvider;
-  employee_no: string | null;
-  job_title: string | null;
-  avatar_url: string | null;
-  departments: UserDepartment[];
-  managed_department_ids: string[];
-}
-
-export interface AuthProvidersResponse {
-  feishu_enabled: boolean;
-  local_login_enabled: boolean;
-  mock_enabled: boolean;
-}
-
-export interface MockUser {
-  id: string;
-  display_name: string | null;
-  email: string | null;
-  role: UserRole;
-  employee_no: string | null;
-  job_title: string | null;
-  avatar_url: string | null;
-  departments: UserDepartment[];
-  managed_department_ids: string[];
-}
-
-export interface MockUsersResponse {
-  items: MockUser[];
-}
-
-export interface LoginInput {
-  email: string;
-  password: string;
-  remember_me: boolean;
-}
+// 直连 OpenAPI 契约类型，消除与后端 DTO 重复的手写镜像接口。
+export type UserRole = ApiSchemas["UserRole"];
+export type AuthProvider = ApiSchemas["AuthProvider"];
+export type UserDepartment = ApiSchemas["UserDepartmentItem"];
+export type User = ApiSchemas["UserResponse"];
+export type AuthProvidersResponse = ApiSchemas["AuthProvidersResponse"];
+export type MockUser = ApiSchemas["MockUserResponse"];
+export type MockUsersResponse = ApiSchemas["MockUserListResponse"];
+export type LoginInput = ApiSchemas["LoginRequest"];
 
 const USER_ROLE_LABELS: Record<UserRole, string> = {
   super_admin: "超级管理员",

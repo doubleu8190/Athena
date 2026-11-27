@@ -52,6 +52,7 @@ from app.knowledge.service import (
 from common.unset import UNSET, UnsetType
 from domain.access import VisibilityGrantInput, VisibilityScope
 from domain.knowledge.model import (
+    DocumentState,
     OriginalStorageError,
 )
 from domain.knowledge.ports import DocumentFileValidator
@@ -212,7 +213,7 @@ def build_knowledge_router(
         return KnowledgeImportResponse(
             document_id=document.id,
             version_id=version_id,
-            state="queued",
+            state=DocumentState.QUEUED,
             status_url=f"/api/v1/knowledge-bases/{base_id}/documents/{document.id}",
         )
 
@@ -257,7 +258,7 @@ def build_knowledge_router(
         return KnowledgeImportResponse(
             document_id=document.id,
             version_id=version_id,
-            state="queued",
+            state=DocumentState.QUEUED,
             status_url=f"/api/v1/knowledge-bases/{base_id}/documents/{document.id}",
         )
 
@@ -304,7 +305,7 @@ def build_knowledge_router(
         return KnowledgeImportResponse(
             document_id=document.id,
             version_id=version_id,
-            state="queued",
+            state=DocumentState.QUEUED,
             status_url=f"/api/v1/knowledge-bases/{base_id}/documents/{document.id}",
         )
 
@@ -345,7 +346,7 @@ def build_knowledge_router(
         return KnowledgeImportResponse(
             document_id=document.id,
             version_id=version_id,
-            state="queued",
+            state=DocumentState.QUEUED,
             status_url=f"/api/v1/knowledge-bases/{base_id}/documents/{document.id}",
         )
 

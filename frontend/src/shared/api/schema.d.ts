@@ -2220,17 +2220,21 @@ export interface components {
             parts: components["schemas"]["MessagePartResponse"][];
             /** Reply To Message Id */
             reply_to_message_id: string | null;
-            /** Role */
-            role: string;
+            role: components["schemas"]["ConversationRole"];
             /** Run Id */
             run_id: string;
             /** Sequence */
             sequence: number;
             /** Session Id */
             session_id: string;
-            /** Status */
-            status: string;
+            status: components["schemas"]["MessageStatus"];
         };
+        /**
+         * ConversationRole
+         * @description 会话流的参与者角色。
+         * @enum {string}
+         */
+        ConversationRole: "user" | "assistant";
         /**
          * CreateUserMemoryRequest
          * @description 手动新增显式记忆请求。
@@ -2285,6 +2289,12 @@ export interface components {
          */
         DepartmentStatus: "active" | "archived";
         /**
+         * DependencyCheckStatus
+         * @description 导入环境中的依赖检查结论。
+         * @enum {string}
+         */
+        DependencyCheckStatus: "satisfied" | "dependency_unsatisfied" | "dependency_invalid";
+        /**
          * DeptAdminScopeResponse
          * @description 部门管理员已授权管辖范围项。
          */
@@ -2298,6 +2308,12 @@ export interface components {
             /** Include Subdepartments */
             include_subdepartments: boolean;
         };
+        /**
+         * DocumentState
+         * @description 文档版本处理状态。
+         * @enum {string}
+         */
+        DocumentState: "queued" | "processing" | "ready" | "failed";
         /**
          * FeishuSyncResponse
          * @description 手动触发飞书通讯录同步结果。
@@ -2357,10 +2373,9 @@ export interface components {
         HealthResponse: {
             /**
              * Status
-             * @default ok
              * @constant
              */
-            status?: "ok";
+            status: "ok";
         };
         /**
          * HttpServerCreateRequest
@@ -2427,6 +2442,12 @@ export interface components {
             /** Detail */
             detail?: components["schemas"]["ValidationError"][];
         };
+        /**
+         * InputRequestStatus
+         * @description 输入请求状态。
+         * @enum {string}
+         */
+        InputRequestStatus: "pending" | "answered" | "closed";
         /** KnowledgeBaseListResponse */
         KnowledgeBaseListResponse: {
             /** Items */
@@ -2524,8 +2545,7 @@ export interface components {
         KnowledgeImportResponse: {
             /** Document Id */
             document_id: string;
-            /** State */
-            state: string;
+            state: components["schemas"]["DocumentState"];
             /** Status Url */
             status_url: string;
             /** Version Id */
@@ -2592,8 +2612,7 @@ export interface components {
             error_code: string | null;
             /** Id */
             id: string;
-            /** State */
-            state: string;
+            state: components["schemas"]["DocumentState"];
             /** Warnings */
             warnings: string[];
         };
@@ -2626,6 +2645,24 @@ export interface components {
             include_subdepartments?: boolean;
         };
         /**
+         * McpHttpConfigResponse
+         * @description Streamable HTTP 类型 MCP Server 的安全连接配置响应。
+         */
+        McpHttpConfigResponse: {
+            /** Url */
+            url: string;
+        };
+        /**
+         * McpSecretMetadataResponse
+         * @description MCP Server 单条脱敏秘密元数据响应（仅暴露名称与是否已配置，不含明文）。
+         */
+        McpSecretMetadataResponse: {
+            /** Has Value */
+            has_value: boolean;
+            /** Name */
+            name: string;
+        };
+        /**
          * McpServerListResponse
          * @description MCP Server 分页。
          */
@@ -2645,9 +2682,7 @@ export interface components {
          */
         McpServerResponse: {
             /** Config */
-            config: {
-                [key: string]: unknown;
-            };
+            config: components["schemas"]["McpHttpConfigResponse"] | components["schemas"]["McpStdioConfigResponse"];
             /** Config Version */
             config_version: number;
             /**
@@ -2666,13 +2701,14 @@ export interface components {
             /** Owner Department Id */
             owner_department_id: string | null;
             /** Secrets */
-            secrets: {
-                [key: string]: unknown;
-            }[];
+            secrets: components["schemas"]["McpSecretMetadataResponse"][];
             /** Tools Discovered At */
             tools_discovered_at: string | null;
-            /** Transport */
-            transport: string;
+            /**
+             * Transport
+             * @enum {string}
+             */
+            transport: "streamable_http" | "stdio";
             /**
              * Updated At
              * Format: date-time
@@ -2686,7 +2722,25 @@ export interface components {
              */
             visibility_scope: "company" | "department";
         };
+        /**
+         * McpStdioConfigResponse
+         * @description Stdio 类型 MCP Server 的安全连接配置响应。
+         */
+        McpStdioConfigResponse: {
+            /** Args */
+            args: string[];
+            /** Command */
+            command: string;
+            /** Cwd */
+            cwd: string | null;
+        };
         MessagePartResponse: components["schemas"]["TextPartResponse"] | components["schemas"]["FileRefPartResponse"] | components["schemas"]["ToolCallPartResponse"] | components["schemas"]["ToolResultPartResponse"];
+        /**
+         * MessageStatus
+         * @description 会话消息的生命周期状态。
+         * @enum {string}
+         */
+        MessageStatus: "pending" | "streaming" | "completed" | "failed" | "cancelled";
         /**
          * MockLoginRequest
          * @description 非生产 Mock 快捷登录请求。
@@ -2849,8 +2903,11 @@ export interface components {
             model: string;
             /** Name */
             name: string;
-            /** Protocol */
-            protocol: string;
+            /**
+             * Protocol
+             * @constant
+             */
+            protocol: "chat_completions";
             /** Request Timeout Seconds */
             request_timeout_seconds: number;
             /** Scenario Description */
@@ -2867,8 +2924,11 @@ export interface components {
             supports_vision: boolean;
             /** Temperature */
             temperature: number | null;
-            /** Tokenizer Encoding */
-            tokenizer_encoding: string;
+            /**
+             * Tokenizer Encoding
+             * @enum {string}
+             */
+            tokenizer_encoding: "o200k_base" | "cl100k_base";
             /**
              * Updated At
              * Format: date-time
@@ -3010,8 +3070,7 @@ export interface components {
             task_index: number;
             /** Task Summary */
             task_summary: string;
-            /** Tool Kind */
-            tool_kind: string | null;
+            tool_kind: components["schemas"]["ToolKind"] | null;
         };
         /** PendingSubagentInputResponse */
         PendingSubagentInputResponse: {
@@ -3164,8 +3223,11 @@ export interface components {
             operation_id: string | null;
             /** Output Tokens */
             output_tokens: number | null;
-            /** Purpose */
-            purpose: string;
+            /**
+             * Purpose
+             * @enum {string}
+             */
+            purpose: "answer" | "compression";
             /** Total Tokens */
             total_tokens: number | null;
         };
@@ -3211,8 +3273,7 @@ export interface components {
             input_request_id: string;
             /** Question Text */
             question_text: string;
-            /** Status */
-            status: string;
+            status: components["schemas"]["InputRequestStatus"];
         };
         /** RunInputRequestResponse */
         RunInputRequestResponse: {
@@ -3225,8 +3286,7 @@ export interface components {
             id: string;
             /** Question Message Id */
             question_message_id: string;
-            /** Status */
-            status: string;
+            status: components["schemas"]["InputRequestStatus"];
         };
         /** RunListResponse */
         RunListResponse: {
@@ -3275,8 +3335,7 @@ export interface components {
              */
             requested_at: string;
             safe_skill_projection: components["schemas"]["SafeSkillApprovalProjectionResponse"] | null;
-            /** Tool Kind */
-            tool_kind: string | null;
+            tool_kind: components["schemas"]["ToolKind"] | null;
         };
         /** RunResponse */
         RunResponse: {
@@ -3345,8 +3404,7 @@ export interface components {
             /** Session Id */
             session_id: string;
             skill_snapshot: components["schemas"]["RunSkillSnapshotResponse"] | null;
-            /** Status */
-            status: string;
+            status: components["schemas"]["RunStatus"];
             /** Subagent Name */
             subagent_name: string | null;
             /** Subagent Profile Id */
@@ -3382,8 +3440,11 @@ export interface components {
             name: string;
             /** Requires Approval */
             requires_approval: boolean;
-            /** Scope */
-            scope: string;
+            /**
+             * Scope
+             * @enum {string}
+             */
+            scope: "company" | "department" | "personal";
             /** Skill Id */
             skill_id: string;
             /** Slug */
@@ -3402,6 +3463,12 @@ export interface components {
             /** Version */
             version: number;
         };
+        /**
+         * RunStatus
+         * @description Run 生命周期状态。
+         * @enum {string}
+         */
+        RunStatus: "queued" | "running" | "waiting_for_input" | "waiting_for_approval" | "waiting_for_subagents" | "cancelling" | "completed" | "failed" | "cancelled";
         /** RunSubmitRequest */
         RunSubmitRequest: {
             /** Input File Ids */
@@ -3451,14 +3518,12 @@ export interface components {
             safe_skill_projection: components["schemas"]["SafeSkillApprovalProjectionResponse"] | null;
             /** Started At */
             started_at: string | null;
-            /** Status */
-            status: string;
+            status: components["schemas"]["ToolCallStatus"];
             /** Tool Call Id */
             tool_call_id: string;
             /** Tool Id */
             tool_id: string | null;
-            /** Tool Kind */
-            tool_kind: string | null;
+            tool_kind: components["schemas"]["ToolKind"] | null;
             /** Truncated */
             truncated: boolean;
         };
@@ -3485,14 +3550,12 @@ export interface components {
             safe_error_code: string | null;
             /** Started At */
             started_at: string | null;
-            /** Status */
-            status: string;
+            status: components["schemas"]["ToolCallStatus"];
             /** Tool Call Id */
             tool_call_id: string;
             /** Tool Id */
             tool_id: string | null;
-            /** Tool Kind */
-            tool_kind: string | null;
+            tool_kind: components["schemas"]["ToolKind"] | null;
             /** Truncated */
             truncated: boolean;
         };
@@ -3508,8 +3571,7 @@ export interface components {
             };
             /** Message */
             message: string;
-            /** Status */
-            status: string;
+            status: components["schemas"]["ToolOutcomeStatus"];
             /** Truncated */
             truncated: boolean;
         };
@@ -3634,9 +3696,14 @@ export interface components {
             session_id: string;
             /** Size Bytes */
             size_bytes: number;
-            /** Source */
-            source: string;
+            source: components["schemas"]["SessionFileSource"];
         };
+        /**
+         * SessionFileSource
+         * @description 会话中已发布文件的来源。
+         * @enum {string}
+         */
+        SessionFileSource: "upload" | "artifact";
         /**
          * SessionListResponse
          * @description 会话分页响应。
@@ -3767,8 +3834,7 @@ export interface components {
             python_implementation: string;
             /** Python Version */
             python_version: string;
-            /** Status */
-            status: string;
+            status: components["schemas"]["DependencyCheckStatus"];
         };
         /** SkillDependencyItemResponse */
         SkillDependencyItemResponse: {
@@ -3828,9 +3894,14 @@ export interface components {
             skill_id: string;
             /** Skill Version Id */
             skill_version_id: string;
-            /** Status */
-            status: string;
+            status: components["schemas"]["SkillExecutionStatus"];
         };
+        /**
+         * SkillExecutionStatus
+         * @description 脚本附加记录的独立执行状态，不复制 Run 工具状态机。
+         * @enum {string}
+         */
+        SkillExecutionStatus: "running" | "succeeded" | "failed" | "unknown";
         /** SkillMarkdownParseResponse */
         SkillMarkdownParseResponse: {
             /** Description */
@@ -4195,8 +4266,7 @@ export interface components {
             parent_tool_call_id: string;
             /** Safe Error Code */
             safe_error_code: string | null;
-            /** Status */
-            status: string;
+            status: components["schemas"]["RunStatus"];
             /** Sub Run Id */
             sub_run_id: string;
             /** Subagent Name */
@@ -4397,6 +4467,24 @@ export interface components {
             type: "tool_call";
         };
         /**
+         * ToolCallStatus
+         * @description Persisted lifecycle of a model-issued tool call.
+         * @enum {string}
+         */
+        ToolCallStatus: "pending_approval" | "approved" | "executing" | "completed" | "failed" | "cancelled" | "unknown";
+        /**
+         * ToolKind
+         * @description Runtime dispatch source.
+         * @enum {string}
+         */
+        ToolKind: "builtin" | "mcp";
+        /**
+         * ToolOutcomeStatus
+         * @description Business outcome independent of the provider-visible result role.
+         * @enum {string}
+         */
+        ToolOutcomeStatus: "ok" | "error" | "cancelled" | "unknown";
+        /**
          * ToolResultPartResponse
          * @description 工具结果内容块。
          */
@@ -4405,8 +4493,7 @@ export interface components {
             artifacts: components["schemas"]["ArtifactFileRefResponse"][];
             /** Output */
             output: string | null;
-            /** Status */
-            status: string;
+            status: components["schemas"]["ToolResultStatus"];
             /** Tool Call Id */
             tool_call_id: string;
             /**
@@ -4415,6 +4502,12 @@ export interface components {
              */
             type: "tool_result";
         };
+        /**
+         * ToolResultStatus
+         * @description 工具结果的终态。
+         * @enum {string}
+         */
+        ToolResultStatus: "success" | "error";
         /**
          * UpdateCurrentUserRequest
          * @description 当前用户可编辑资料请求。

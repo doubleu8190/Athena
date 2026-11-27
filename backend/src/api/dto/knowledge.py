@@ -7,6 +7,7 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field
 
 from api.dto.access import VisibilityGrantRequest, VisibilityGrantResponse
+from domain.knowledge import DocumentState
 
 
 class KnowledgeBaseRequest(BaseModel):
@@ -58,7 +59,8 @@ class KnowledgeDocumentPatchRequest(BaseModel):
 class KnowledgeVersionResponse(BaseModel):
     id: str
     document_id: str
-    state: str
+    # 复用领域 DocumentState 枚举，收紧版本状态为封闭集合。
+    state: DocumentState
     error_code: str | None
     warnings: list[str]
     chunk_count: int
@@ -86,7 +88,8 @@ class KnowledgeDocumentListResponse(BaseModel):
 class KnowledgeImportResponse(BaseModel):
     document_id: str
     version_id: str
-    state: str
+    # 与版本状态枚举保持一致，避免 OpenAPI 退化为宽泛 string。
+    state: DocumentState
     status_url: str
 
 

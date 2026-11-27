@@ -7,6 +7,8 @@ from typing import Annotated, Literal
 
 from pydantic import BaseModel, Field
 
+from domain.message import ConversationRole, MessageStatus, ToolResultStatus
+
 
 class TextPartResponse(BaseModel):
     """文本内容块。"""
@@ -49,7 +51,8 @@ class ToolResultPartResponse(BaseModel):
 
     type: Literal["tool_result"]
     tool_call_id: str
-    status: str
+    # 复用领域 ToolResultStatus 枚举，收紧工具结果状态为封闭集合。
+    status: ToolResultStatus
     output: str | None
     artifacts: list[ArtifactFileRefResponse]
 
@@ -65,8 +68,9 @@ class ConversationMessageResponse(BaseModel):
 
     id: str
     session_id: str
-    role: str
-    status: str
+    # 复用领域 ConversationRole 与 MessageStatus 枚举，收紧消息角色与生命周期状态。
+    role: ConversationRole
+    status: MessageStatus
     sequence: int
     parts: list[MessagePartResponse]
     reply_to_message_id: str | None

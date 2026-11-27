@@ -32,7 +32,7 @@ from domain.skill import (
 def dependency_check_to_response(check: DependencyCheck) -> SkillDependencyCheckResponse:
     """转换依赖检查及目标解释器指纹。"""
     return SkillDependencyCheckResponse(
-        status=check.status.value,
+        status=check.status,
         python_version=check.python_version,
         python_implementation=check.python_implementation,
         checked_at=check.checked_at,
@@ -179,7 +179,7 @@ def execution_to_response(execution: SkillExecutionRecord) -> SkillExecutionResp
         input_file_ids=list(execution.input_file_ids),
         python_version=execution.python_version,
         dependency_check=dependency_check_to_response(execution.dependency_check),
-        status=execution.status.value,
+        status=execution.status,
         log_available=execution.log_object_key is not None,
         log_truncated=execution.log_truncated,
         log_error_code=execution.log_error_code,

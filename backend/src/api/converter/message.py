@@ -38,7 +38,7 @@ def _part_to_response(part: MessagePart) -> MessagePartResponse:
     return ToolResultPartResponse(
         type="tool_result",
         tool_call_id=part.tool_call_id,
-        status=part.status.value,
+        status=part.status,
         output=part.output,
         artifacts=[
             ArtifactFileRefResponse(
@@ -60,8 +60,8 @@ def conversation_message_to_response(
     return ConversationMessageResponse(
         id=message.id,
         session_id=message.session_id,
-        role=message.role.value,
-        status=message.status.value,
+        role=message.role,
+        status=message.status,
         sequence=message.sequence,
         parts=[_part_to_response(part) for part in message.parts],
         reply_to_message_id=message.reply_to_message_id,

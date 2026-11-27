@@ -464,3 +464,209 @@ def test_normalize_openapi_schema_handles_same_name_conflicts_and_preserves_inpu
         {"$ref": "#/components/schemas/Wrapper"},
     ]
     assert post_schema["discriminator"]["mapping"] == {"alt": "#/components/schemas/Item_2"}
+
+
+def test_openapi_response_schemas_have_no_optional_fields() -> None:
+    """所有响应 DTO 的全部属性在 OpenAPI 中均须为 required，不得因默认值退化为可选属性 ?:。"""
+    schema = export_openapi_schema()
+    component_schemas: dict[str, Any] = schema["components"]["schemas"]
+
+    # 仅排除请求模型、FastAPI 内置校验模型、multipart 表单体及纯枚举定义。
+    excluded_exact = {"HTTPValidationError", "ValidationError", "ManagedDepartmentInput"}
+    optional_violations: dict[str, list[str]] = {}
+    for name, spec in sorted(component_schemas.items()):
+        if (
+            name in excluded_exact
+            or name.endswith("Request")
+            or name.startswith("Body_")
+            or "enum" in spec
+        ):
+            continue
+        properties = spec.get("properties")
+        if not isinstance(properties, dict):
+            continue
+        required = set(spec.get("required", ()))
+        optional_fields = [field_name for field_name in properties if field_name not in required]
+        if optional_fields:
+            optional_violations[name] = optional_fields
+
+    assert optional_violations == {}
+    # 明确验证 HealthResponse.status 已收紧为必填常量。
+    assert component_schemas["HealthResponse"]["required"] == ["status"]
+    assert component_schemas["HealthResponse"]["properties"]["status"] == {
+        "const": "ok",
+        "title": "Status",
+        "type": "string",
+    }
+
+
+def test_openapi_response_enums_and_named_submodels_tightened() -> None:
+    """验证各域 Response DTO 的封闭枚举与具名子模型已准确导出到 OpenAPI Schema。"""
+    schema = export_openapi_schema()
+    schemas: dict[str, Any] = schema["components"]["schemas"]
+
+    # 1. LLM 模型配置响应：protocol 与 tokenizer_encoding 收紧为封闭字面量。
+    model_profile_props = schemas["ModelProfileResponse"]["properties"]
+    assert model_profile_props["protocol"]["const"] == "chat_completions"
+    assert set(model_profile_props["tokenizer_encoding"]["enum"]) == {
+        "o200k_base",
+        "cl100k_base",
+    }
+
+    # 2. MCP Server 响应：transport、config 具名联合模型与 secrets 具名元数据列表。
+    mcp_props = schemas["McpServerResponse"]["properties"]
+    assert mcp_props["transport"]["enum"] == ["streamable_http", "stdio"]
+    assert mcp_props["config"]["anyOf"] == [
+        {"$ref": "#/components/schemas/McpHttpConfigResponse"},
+        {"$ref": "#/components/schemas/McpStdioConfigResponse"},
+    ]
+    assert mcp_props["secrets"]["items"] == {
+        "$ref": "#/components/schemas/McpSecretMetadataResponse"
+    }
+    assert schemas["McpHttpConfigResponse"]["required"] == ["url"]
+    assert set(schemas["McpStdioConfigResponse"]["required"]) == {"command", "args", "cwd"}
+    assert set(schemas["McpSecretMetadataResponse"]["required"]) == {"name", "has_value"}
+
+    # 3. 会话文件响应：source 复用领域 SessionFileSource 枚举。
+    assert (
+        schemas["SessionFileResponse"]["properties"]["source"]["$ref"]
+        == "#/components/schemas/SessionFileSource"
+    )
+    assert schemas["SessionFileSource"]["enum"] == ["upload", "artifact"]
+
+    # 4. 知识库版本与导入响应：state 复用领域 DocumentState 枚举。
+    assert (
+        schemas["KnowledgeVersionResponse"]["properties"]["state"]["$ref"]
+        == "#/components/schemas/DocumentState"
+    )
+    assert (
+        schemas["KnowledgeImportResponse"]["properties"]["state"]["$ref"]
+        == "#/components/schemas/DocumentState"
+    )
+    assert schemas["DocumentState"]["enum"] == ["queued", "processing", "ready", "failed"]
+
+    # 5. Skill 依赖检查、执行状态与可见范围枚举。
+    assert (
+        schemas["SkillDependencyCheckResponse"]["properties"]["status"]["$ref"]
+        == "#/components/schemas/DependencyCheckStatus"
+    )
+    assert schemas["DependencyCheckStatus"]["enum"] == [
+        "satisfied",
+        "dependency_unsatisfied",
+        "dependency_invalid",
+    ]
+    assert (
+        schemas["SkillExecutionResponse"]["properties"]["status"]["$ref"]
+        == "#/components/schemas/SkillExecutionStatus"
+    )
+    assert schemas["SkillExecutionStatus"]["enum"] == [
+        "running",
+        "succeeded",
+        "failed",
+        "unknown",
+    ]
+    assert schemas["SkillSummaryResponse"]["properties"]["scope"]["enum"] == [
+        "company",
+        "department",
+        "personal",
+    ]
+
+    # 6. Run 及子任务、输入请求、技能快照、工具调用与用量响应枚举。
+    assert (
+        schemas["RunResponse"]["properties"]["status"]["$ref"] == "#/components/schemas/RunStatus"
+    )
+    assert (
+        schemas["SubagentTaskResponse"]["properties"]["status"]["$ref"]
+        == "#/components/schemas/RunStatus"
+    )
+    assert schemas["RunStatus"]["enum"] == [
+        "queued",
+        "running",
+        "waiting_for_input",
+        "waiting_for_approval",
+        "waiting_for_subagents",
+        "cancelling",
+        "completed",
+        "failed",
+        "cancelled",
+    ]
+    assert schemas["RunSkillEntryResponse"]["properties"]["scope"]["enum"] == [
+        "company",
+        "department",
+        "personal",
+    ]
+    assert (
+        schemas["RunInputRequestResponse"]["properties"]["status"]["$ref"]
+        == "#/components/schemas/InputRequestStatus"
+    )
+    assert (
+        schemas["RunInputInteractionResponse"]["properties"]["status"]["$ref"]
+        == "#/components/schemas/InputRequestStatus"
+    )
+    assert schemas["InputRequestStatus"]["enum"] == ["pending", "answered", "closed"]
+    assert (
+        schemas["RunToolOutcomeResponse"]["properties"]["status"]["$ref"]
+        == "#/components/schemas/ToolOutcomeStatus"
+    )
+    assert schemas["ToolOutcomeStatus"]["enum"] == ["ok", "error", "cancelled", "unknown"]
+    assert (
+        schemas["RunToolCallSummaryResponse"]["properties"]["status"]["$ref"]
+        == "#/components/schemas/ToolCallStatus"
+    )
+    assert (
+        schemas["RunToolCallDetailResponse"]["properties"]["status"]["$ref"]
+        == "#/components/schemas/ToolCallStatus"
+    )
+    assert schemas["ToolCallStatus"]["enum"] == [
+        "pending_approval",
+        "approved",
+        "executing",
+        "completed",
+        "failed",
+        "cancelled",
+        "unknown",
+    ]
+    assert schemas["RunAttemptUsageResponse"]["properties"]["purpose"]["enum"] == [
+        "answer",
+        "compression",
+    ]
+    expected_nullable_tool_kind = [
+        {"$ref": "#/components/schemas/ToolKind"},
+        {"type": "null"},
+    ]
+    assert schemas["ToolKind"]["enum"] == ["builtin", "mcp"]
+    assert (
+        schemas["RunPendingToolApprovalResponse"]["properties"]["tool_kind"]["anyOf"]
+        == expected_nullable_tool_kind
+    )
+    assert (
+        schemas["PendingSubagentApprovalResponse"]["properties"]["tool_kind"]["anyOf"]
+        == expected_nullable_tool_kind
+    )
+    assert (
+        schemas["RunToolCallSummaryResponse"]["properties"]["tool_kind"]["anyOf"]
+        == expected_nullable_tool_kind
+    )
+
+    # 7. 消息与工具结果内容块枚举。
+    assert (
+        schemas["ConversationMessageResponse"]["properties"]["role"]["$ref"]
+        == "#/components/schemas/ConversationRole"
+    )
+    assert schemas["ConversationRole"]["enum"] == ["user", "assistant"]
+    assert (
+        schemas["ConversationMessageResponse"]["properties"]["status"]["$ref"]
+        == "#/components/schemas/MessageStatus"
+    )
+    assert schemas["MessageStatus"]["enum"] == [
+        "pending",
+        "streaming",
+        "completed",
+        "failed",
+        "cancelled",
+    ]
+    assert (
+        schemas["ToolResultPartResponse"]["properties"]["status"]["$ref"]
+        == "#/components/schemas/ToolResultStatus"
+    )
+    assert schemas["ToolResultStatus"]["enum"] == ["success", "error"]

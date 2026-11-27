@@ -362,7 +362,7 @@ export function makeToolCallDetail(
       code: "ok",
       data: { result: "真实结果" },
       message: "工具执行成功",
-      status: "success",
+      status: "ok",
       truncated: false,
     },
     safe_skill_projection: null,

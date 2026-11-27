@@ -1,16 +1,8 @@
-export interface UserModelItem {
-  id: string;
-  name: string;
-  scenario_label: string | null;
-  scenario_description: string | null;
-  is_default: boolean;
-  supports_vision: boolean;
-}
+import type { ApiSchemas } from "../../shared/api/client";
 
-export interface UserModelListResponse {
-  items: UserModelItem[];
-  default_model_id: string | null;
-}
+// 直连 OpenAPI 用户侧模型目录契约。
+export type UserModelItem = ApiSchemas["UserModelCatalogItemResponse"];
+export type UserModelListResponse = ApiSchemas["UserModelCatalogResponse"];
 
 /**
  * 计算面向普通用户的场景化模型展示名：

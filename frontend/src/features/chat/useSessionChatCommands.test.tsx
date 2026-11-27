@@ -222,7 +222,7 @@ describe("useSessionChatCommands 命令与审批子 Hook", () => {
           created_at: "2026-11-10T03:00:00Z",
           input_request_id: "inp-sub-1",
           question_text: "请确认目标年份",
-          status: "waiting",
+          status: "pending",
         },
       ],
       session_id: "session-cmd",

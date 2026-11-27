@@ -435,14 +435,12 @@ function ToolStepRow({
                     </span>
                     <Badge
                       variant={
-                        details.data.outcome.status === "success" ||
                         details.data.outcome.status === "ok"
                           ? "success"
                           : "warning"
                       }
                     >
-                      {details.data.outcome.status === "success" ||
-                      details.data.outcome.status === "ok"
+                      {details.data.outcome.status === "ok"
                         ? "执行成功"
                         : "执行异常"}
                     </Badge>
@@ -791,12 +789,13 @@ export function ExecutionProgressAccordion({
       const firstApproval =
         run.pending_approvals[0] ?? run.pending_subagent_approvals?.[0];
       const approvalName = firstApproval
-        ? firstApproval.display_name?.trim() ||
-          resolveToolDisplayName({
-            display_name: firstApproval.display_name,
-            model_name: firstApproval.model_name,
-            tool_id: null,
-          })
+        ? resolveToolDisplayName(
+            {
+              model_name: firstApproval.model_name,
+              tool_id: null,
+            },
+            firstApproval.display_name,
+          )
         : null;
       summaryText = approvalName
         ? `等待确认操作「${approvalName}」`

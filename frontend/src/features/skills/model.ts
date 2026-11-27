@@ -1,8 +1,6 @@
+import type { ApiSchemas } from "../../shared/api/client";
 import { countCodePoints } from "../../shared/lib/text";
-import type {
-  VisibilityGrant,
-  VisibilityGrantInput,
-} from "../knowledge/model";
+import type { VisibilityGrantInput } from "../knowledge/model";
 
 export const SKILL_ZIP_MAX_BYTES = 25 * 1024 * 1024;
 export const PERSONAL_SKILL_FILE_MAX_BYTES = 1024 * 1024;
@@ -14,142 +12,26 @@ export const SKILL_SLUG_MAX_LENGTH = 64;
 export const SKILL_VERSION_LABEL_MAX_LENGTH = 64;
 export const SKILL_SLUG_PATTERN = /^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$/;
 
-export type SkillFormat = "markdown" | "package";
-export type SkillScope = "company" | "department" | "personal";
-
-export type DependencyCheckStatus =
-  | "satisfied"
-  | "dependency_unsatisfied"
-  | "dependency_invalid";
-
-export interface DependencyCheckItem {
-  requirement: string;
-  package: string;
-  satisfied: boolean;
-  installed_version: string | null;
-  detail_code: string | null;
-  marker_applies: boolean;
-}
-
-export interface DependencyCheck {
-  status: DependencyCheckStatus;
-  python_version: string;
-  python_implementation: string;
-  items: DependencyCheckItem[];
-  checked_at: string;
-}
-
-export interface SkillScriptDefinition {
-  path: string;
-  label: string;
-  purpose: string;
-  parameters: Record<string, unknown>;
-}
-
-export interface SkillPackageResource {
-  path: string;
-  size_bytes: number;
-  sha256: string;
-  text: boolean;
-}
-
-export interface SkillPackageManifest {
-  version: number;
-  slug: string;
-  name: string;
-  description: string;
-  dependencies: string[];
-  guide: string;
-  scripts: SkillScriptDefinition[];
-  files: SkillPackageResource[];
-}
-
-export interface Skill {
-  id: string;
-  slug: string;
-  name: string;
-  description: string;
-  current_version_id: string | null;
-  current_version_label: string | null;
-  enabled: boolean;
-  script_requires_approval: boolean;
-  revision: number;
-  scope: SkillScope;
-  owner_department_id: string | null;
-  visibility_grants: VisibilityGrant[];
-  format: SkillFormat;
-  has_scripts: boolean;
-  featured: boolean;
-  starter_prompt: string | null;
-  updated_at: string;
-  dependency_check: DependencyCheck | null;
-}
-
-export interface SkillVersion {
-  id: string;
-  skill_id: string;
-  ordinal: number;
-  label: string;
-  slug: string;
-  name: string;
-  description: string;
-  guide: string;
-  dependencies: string[];
-  dependency_check: DependencyCheck;
-  scripts: SkillScriptDefinition[];
-  files: SkillPackageResource[];
-  package_sha256: string;
-  created_at: string;
-}
-
-export interface SkillVersionPage {
-  items: SkillVersion[];
-  total: number;
-  page: number;
-  page_size: number;
-}
-
-export interface SkillListResponse {
-  items: Skill[];
-}
-
-export interface SkillAdminDetails extends Skill {
-  versions: SkillVersion[];
-}
-
-export interface SkillConfigurationInput {
-  current_version_id: string;
-  enabled: boolean;
-  expected_revision: number;
-  featured?: boolean;
-  script_requires_approval: boolean;
-  starter_prompt?: string | null;
-  visibility_grants?: VisibilityGrantInput[];
-}
-
-/** 契约 3.5：POST /api/v1/admin/skills/markdown（严格 extra="forbid"，不传多余字段）。 */
-export interface AdminSkillMarkdownCreateInput {
-  description: string;
-  enabled: boolean;
-  featured: boolean;
-  guide: string;
-  name: string;
-  owner_department_id?: string | null;
-  scope: "company" | "department";
-  slug?: string | null;
-  starter_prompt?: string | null;
-  visibility_grants?: VisibilityGrantInput[] | null;
-}
-
-/** 契约 3.6：POST /api/v1/admin/skills/{skill_id}/versions/markdown（严格 extra="forbid"）。 */
-export interface AdminSkillMarkdownVersionInput {
-  activate: boolean;
-  description: string;
-  expected_revision: number;
-  guide: string;
-  label?: string | null;
-  name: string;
-}
+// 直连 OpenAPI 技能管理与个人技能契约。
+export type Skill = ApiSchemas["SkillSummaryResponse"];
+export type SkillFormat = Skill["format"];
+export type SkillScope = Skill["scope"];
+export type DependencyCheckStatus = ApiSchemas["DependencyCheckStatus"];
+export type DependencyCheckItem = ApiSchemas["SkillDependencyItemResponse"];
+export type DependencyCheck = ApiSchemas["SkillDependencyCheckResponse"];
+export type SkillScriptDefinition = ApiSchemas["SkillScriptResponse"];
+export type SkillPackageResource = ApiSchemas["SkillPackageResourceResponse"];
+export type SkillVersion = ApiSchemas["SkillVersionResponse"];
+export type SkillVersionPage = ApiSchemas["SkillVersionListResponse"];
+export type SkillListResponse = ApiSchemas["SkillDirectoryResponse"];
+export type SkillAdminDetails = ApiSchemas["SkillAdminDetailsResponse"];
+export type SkillConfigurationInput = ApiSchemas["SkillConfigurationRequest"];
+export type AdminSkillMarkdownCreateInput =
+  ApiSchemas["AdminSkillMarkdownCreateRequest"];
+export type AdminSkillMarkdownVersionInput =
+  ApiSchemas["AdminSkillMarkdownVersionRequest"];
+export type PersonalSkillInput = ApiSchemas["SkillPersonalCreateRequest"];
+export type PersonalSkillDraft = ApiSchemas["SkillMarkdownParseResponse"];
 
 export interface ImportSkillPackageOptions {
   ownerDepartmentId?: string;
@@ -165,14 +47,6 @@ export interface SkillFormState {
   starterPrompt: string;
   visibilityGrants: VisibilityGrantInput[];
 }
-
-export interface PersonalSkillInput {
-  name: string;
-  description: string;
-  guide: string;
-}
-
-export type PersonalSkillDraft = PersonalSkillInput;
 
 export interface PersonalSkillFieldErrors {
   name?: string;

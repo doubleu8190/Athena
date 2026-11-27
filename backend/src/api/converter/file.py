@@ -31,7 +31,7 @@ def session_file_to_response(file: SessionFile) -> SessionFileResponse:
     return SessionFileResponse(
         id=file.id,
         session_id=file.session_id,
-        source=file.source.value,
+        source=file.source,
         filename=file.filename,
         label=file.label,
         mime_type=file.mime_type,

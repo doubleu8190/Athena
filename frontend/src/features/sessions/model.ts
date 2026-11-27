@@ -1,19 +1,12 @@
+import type { ApiSchemas } from "../../shared/api/client";
+
 export const SESSION_TITLE_MAX_LENGTH = 120;
 
-export interface Session {
-  created_at: string;
-  id: string;
-  project_id: string | null;
-  title: string | null;
-  updated_at: string;
-}
-
-export interface SessionListResponse {
-  items: Session[];
-  page: number;
-  page_size: number;
-  total: number;
-}
+// 直连 OpenAPI 会话契约。
+export type Session = ApiSchemas["SessionResponse"];
+export type SessionListResponse = ApiSchemas["SessionListResponse"];
+export type SessionCreateInput = ApiSchemas["SessionCreateRequest"];
+export type SessionUpdateInput = ApiSchemas["SessionUpdateRequest"];
 
 export interface SessionListQuery {
   page?: number;
@@ -103,16 +96,6 @@ export function groupSessionsByTime(
       label: SESSION_TIME_GROUP_LABELS[key],
     }),
   );
-}
-
-export interface SessionCreateInput {
-  project_id?: string | null;
-  title?: string | null;
-}
-
-export interface SessionUpdateInput {
-  project_id?: string | null;
-  title?: string | null;
 }
 
 const CONTROL_CHARACTER_PATTERN = /\p{Cc}/u;

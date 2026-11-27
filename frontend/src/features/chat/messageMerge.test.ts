@@ -82,7 +82,7 @@ describe("会话消息合并", () => {
     const resultPart = {
       artifacts: [],
       output: "查询完成",
-      status: "completed",
+      status: "success" as const,
       tool_call_id: "tool-call-1",
       type: "tool_result" as const,
     };

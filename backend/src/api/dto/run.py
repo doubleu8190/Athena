@@ -8,6 +8,8 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field
 
 from api.dto.message import ArtifactFileRefResponse
+from domain.run import InputRequestStatus, RunStatus
+from domain.tool import ToolCallStatus, ToolKind, ToolOutcomeStatus
 
 
 class RunSubmitRequest(BaseModel):
@@ -96,7 +98,8 @@ class RunPendingToolApprovalResponse(BaseModel):
     batch_message_id: str
     ordinal: int
     model_name: str
-    tool_kind: str | None
+    # 复用领域 ToolKind 枚举，收紧工具来源分类。
+    tool_kind: ToolKind | None
     requested_at: datetime
     safe_skill_projection: SafeSkillApprovalProjectionResponse | None
     display_name: str | None
@@ -111,7 +114,8 @@ class RunAttemptUsageResponse(BaseModel):
     output_tokens: int | None
     total_tokens: int | None
     complete: bool
-    purpose: str
+    # 与领域 RunAttemptUsage.purpose 保持一致，收紧为回答或压缩两类用途。
+    purpose: Literal["answer", "compression"]
     operation_id: str | None
     batch_index: int
     model_profile_id: str | None
@@ -131,13 +135,14 @@ class RunUsageResponse(BaseModel):
 class RunInputRequestResponse(BaseModel):
     id: str
     question_message_id: str
-    status: str
+    # 复用领域 InputRequestStatus 枚举，收紧输入请求状态。
+    status: InputRequestStatus
     created_at: datetime
 
 
 class RunInputInteractionResponse(BaseModel):
     input_request_id: str
-    status: str
+    status: InputRequestStatus
     question_text: str
     answer_text: str | None
     created_at: datetime
@@ -147,7 +152,8 @@ class RunInputInteractionResponse(BaseModel):
 class RunSkillEntryResponse(BaseModel):
     skill_id: str
     slug: str
-    scope: str
+    # 与 SkillSummaryResponse.scope 及领域 SkillScope 保持一致。
+    scope: Literal["company", "department", "personal"]
     name: str
     description: str
     version_id: str
@@ -169,7 +175,8 @@ class SubagentTaskResponse(BaseModel):
     subagent_name: str
     task_index: int
     task_summary: str
-    status: str
+    # 复用领域 RunStatus 枚举，与主 Run 状态机保持一致。
+    status: RunStatus
     safe_error_code: str | None
     created_at: datetime
     first_started_at: datetime | None
@@ -198,7 +205,7 @@ class PendingSubagentApprovalResponse(BaseModel):
     batch_message_id: str
     ordinal: int
     model_name: str
-    tool_kind: str | None
+    tool_kind: ToolKind | None
     requested_at: datetime
     safe_skill_projection: SafeSkillApprovalProjectionResponse | None
     display_name: str | None
@@ -209,7 +216,7 @@ class PendingSubagentApprovalResponse(BaseModel):
 class RunResponse(BaseModel):
     id: str
     session_id: str
-    status: str
+    status: RunStatus
     trigger_message_id: str
     context_cutoff_sequence: int
     retry_of_run_id: str | None
@@ -268,7 +275,8 @@ class RunEventListResponse(BaseModel):
 
 
 class RunToolOutcomeResponse(BaseModel):
-    status: str
+    # 复用领域 ToolOutcomeStatus / ToolKind / ToolCallStatus 枚举，收紧工具执行结果与调用状态。
+    status: ToolOutcomeStatus
     code: str
     message: str
     data: dict[str, object]
@@ -281,9 +289,9 @@ class RunToolCallSummaryResponse(BaseModel):
     tool_call_id: str
     ordinal: int
     tool_id: str | None
-    tool_kind: str | None
+    tool_kind: ToolKind | None
     model_name: str
-    status: str
+    status: ToolCallStatus
     started_at: datetime | None
     finished_at: datetime | None
     duration_ms: int | None

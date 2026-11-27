@@ -112,14 +112,36 @@ class McpServerEnabledRequest(BaseModel):
     expected_config_version: int | None = Field(default=None, ge=1)
 
 
+class McpHttpConfigResponse(BaseModel):
+    """Streamable HTTP 类型 MCP Server 的安全连接配置响应。"""
+
+    url: str
+
+
+class McpStdioConfigResponse(BaseModel):
+    """Stdio 类型 MCP Server 的安全连接配置响应。"""
+
+    command: str
+    args: list[str]
+    cwd: str | None
+
+
+class McpSecretMetadataResponse(BaseModel):
+    """MCP Server 单条脱敏秘密元数据响应（仅暴露名称与是否已配置，不含明文）。"""
+
+    name: str
+    has_value: bool
+
+
 class McpServerResponse(BaseModel):
     """管理员可见的 Server 配置、启停状态、可见范围与脱敏秘密状态。"""
 
     id: str
     name: str
-    transport: str
-    config: dict[str, Any]
-    secrets: list[dict[str, Any]]
+    # 收紧传输类型、连接配置与脱敏秘密元数据为具名模型，保持运行时 JSON 载荷 100% 兼容。
+    transport: Literal["streamable_http", "stdio"]
+    config: McpHttpConfigResponse | McpStdioConfigResponse
+    secrets: list[McpSecretMetadataResponse]
     config_version: int
     enabled: bool
     visibility_scope: Literal["company", "department"]
@@ -143,12 +165,15 @@ class McpServerListResponse(BaseModel):
 __all__ = [
     "HttpServerCreateRequest",
     "HttpServerUpdateRequest",
+    "McpHttpConfigResponse",
+    "McpSecretMetadataResponse",
     "McpServerCreateRequest",
     "McpServerEnabledRequest",
     "McpServerListResponse",
     "McpServerPatchRequest",
     "McpServerResponse",
     "McpServerUpdateRequest",
+    "McpStdioConfigResponse",
     "StdioServerCreateRequest",
     "StdioServerUpdateRequest",
 ]

@@ -1,3 +1,4 @@
+import type { ApiSchemas } from "../../shared/api/client";
 import { countCodePoints } from "../../shared/lib/text";
 
 export const PROJECT_NAME_MAX_LENGTH = 120;
@@ -5,43 +6,15 @@ export const PROJECT_DESCRIPTION_MAX_LENGTH = 500;
 export const PROJECT_INSTRUCTIONS_MAX_LENGTH = 8000;
 export const PROJECT_DEFAULT_SKILLS_MAX = 20;
 
-export interface Project {
-  created_at: string;
-  /** 项目默认挂载技能 ID 列表。 */
-  default_skill_ids: string[];
-  /** 项目简介（最大 500 字，未填写时为 null）。 */
-  description: string | null;
-  id: string;
-  /** 项目专属背景指令（最大 8,000 字，仅注入主对话，未配置时为 null）。 */
-  instructions: string | null;
-  name: string;
-  updated_at: string;
-}
-
-export interface ProjectListResponse {
-  items: Project[];
-  page: number;
-  page_size: number;
-  total: number;
-}
+// 直连 OpenAPI 项目契约。
+export type Project = ApiSchemas["ProjectResponse"];
+export type ProjectListResponse = ApiSchemas["ProjectListResponse"];
+export type ProjectCreateInput = ApiSchemas["ProjectCreateRequest"];
+export type ProjectUpdateInput = ApiSchemas["ProjectUpdateRequest"];
 
 export interface ProjectListQuery {
   page?: number;
   pageSize?: number;
-}
-
-export interface ProjectCreateInput {
-  default_skill_ids?: string[];
-  description?: string | null;
-  instructions?: string | null;
-  name: string;
-}
-
-export interface ProjectUpdateInput {
-  default_skill_ids?: string[];
-  description?: string | null;
-  instructions?: string | null;
-  name?: string;
 }
 
 const CONTROL_CHARACTER_PATTERN = /\p{Cc}/u;

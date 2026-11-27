@@ -8,6 +8,7 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field
 
 from api.dto.access import VisibilityGrantRequest, VisibilityGrantResponse
+from domain.skill import DependencyCheckStatus, SkillExecutionStatus
 
 
 class SkillDependencyItemResponse(BaseModel):
@@ -20,7 +21,8 @@ class SkillDependencyItemResponse(BaseModel):
 
 
 class SkillDependencyCheckResponse(BaseModel):
-    status: str
+    # 复用领域 DependencyCheckStatus 枚举，收紧依赖检查状态为封闭集合。
+    status: DependencyCheckStatus
     python_version: str
     python_implementation: str
     checked_at: datetime
@@ -180,7 +182,8 @@ class SkillExecutionResponse(BaseModel):
     input_file_ids: list[str]
     python_version: str
     dependency_check: SkillDependencyCheckResponse
-    status: str
+    # 复用领域 SkillExecutionStatus 枚举，收紧脚本执行状态为封闭集合。
+    status: SkillExecutionStatus
     log_available: bool
     log_truncated: bool
     log_error_code: str | None

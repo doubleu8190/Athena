@@ -540,7 +540,7 @@ describe("M2.5 吸底沉浸式对话工作台（下）", () => {
         id: "tc-kb",
         model_name: "knowledge_search",
         ordinal: 1,
-        status: "running",
+        status: "executing",
         tool_call_id: "call-kb",
         tool_id: "builtin_knowledge_search",
       }),

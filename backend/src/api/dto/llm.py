@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -83,11 +84,12 @@ class ModelProfileResponse(BaseModel):
 
     id: str
     name: str
-    protocol: str
+    # 与领域 ModelProfileVersion 及数据库约束对齐，收紧为封闭字面量集合。
+    protocol: Literal["chat_completions"]
     base_url: str
     model: str
     context_window_tokens: int
-    tokenizer_encoding: str
+    tokenizer_encoding: Literal["o200k_base", "cl100k_base"]
     supports_stream: bool
     supports_tools: bool
     supports_parallel_tool_calls: bool

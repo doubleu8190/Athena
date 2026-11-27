@@ -12,6 +12,7 @@ import {
 } from "../../test/fixtures";
 import { jsonResponse } from "../../test/testUtils";
 import type {
+  ConversationMessage,
   RunEvent,
   RunSnapshotPayload,
   RunStatus,
@@ -364,7 +365,7 @@ describe("自包含终态快照解析与内联收敛", () => {
                 },
               ],
               output: "导出完成",
-              status: "completed",
+              status: "success",
               tool_call_id: "tc-1",
               type: "tool_result",
             },
@@ -892,7 +893,7 @@ describe("单次有界终态兜底与报告身份校验", () => {
     expect(requestUrl.searchParams.get("before_sequence")).toBeNull();
   });
 
-  it.each([
+  it.each<[string, Partial<ConversationMessage>]>([
     ["非 assistant", { role: "user" }],
     ["错误 Run", { run_id: "run-other" }],
     ["未完成", { status: "streaming" }],

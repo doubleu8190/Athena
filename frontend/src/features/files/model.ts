@@ -1,3 +1,4 @@
+import type { ApiSchemas } from "../../shared/api/client";
 import { fileExtension } from "../../shared/lib/file";
 
 export const SESSION_FILE_MAX_BYTES = 50 * 1024 * 1024;
@@ -5,50 +6,16 @@ export const SESSION_FILE_PAGE_SIZE = 50;
 export const SESSION_FILE_CONTENT_DEFAULT_LIMIT_BYTES = 65_536;
 export const MAX_VISION_IMAGES_PER_RUN = 5;
 
-export type SessionFileSource = "upload" | "artifact";
-
-/** 办公文档自动提取缓存状态，与后端 SessionFileResponse 严格对齐。 */
-export type SessionFileExtractionStatus = "none" | "ready" | "failed";
-
-/** 文本读取接口返回的内容来源类型：纯文本原件或办公文档提取缓存。 */
-export type SessionFileContentSourceKind = "raw_text" | "extracted_document";
-
-export interface SessionFile {
-  id: string;
-  session_id: string;
-  source: SessionFileSource;
-  filename: string;
-  label: string | null;
-  mime_type: string;
-  size_bytes: number;
-  extraction_status: SessionFileExtractionStatus;
-  extracted_text_bytes: number | null;
-  extraction_error_code: string | null;
-  created_at: string;
-}
-
-export interface SessionFilePage {
-  items: SessionFile[];
-  next_after_file_id: string | null;
-}
-
-export interface SessionFileContentResponse {
-  file: SessionFile;
-  source_kind: SessionFileContentSourceKind;
-  offset: number;
-  next_offset: number;
-  content: string;
-  eof: boolean;
-  truncated: boolean;
-}
-
-export interface ArtifactFileRef {
-  file_id: string;
-  filename: string;
-  label: string | null;
-  mime_type: string;
-  size_bytes: number;
-}
+// 直连 OpenAPI 会话文件与产物引用契约。
+export type SessionFileSource = ApiSchemas["SessionFileSource"];
+export type SessionFile = ApiSchemas["SessionFileResponse"];
+export type SessionFileExtractionStatus = SessionFile["extraction_status"];
+export type SessionFilePage = ApiSchemas["SessionFileListResponse"];
+export type SessionFileContentResponse =
+  ApiSchemas["SessionFileContentResponse"];
+export type SessionFileContentSourceKind =
+  SessionFileContentResponse["source_kind"];
+export type ArtifactFileRef = ApiSchemas["ArtifactFileRefResponse"];
 
 /** 统一文件在线预览与原图灯箱目标元数据（消息气泡、产物卡片、输入器与文件抽屉共用）。 */
 export interface FilePreviewTarget {

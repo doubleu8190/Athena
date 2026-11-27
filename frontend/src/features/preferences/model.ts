@@ -1,3 +1,4 @@
+import type { ApiSchemas } from "../../shared/api/client";
 import { countCodePoints } from "../../shared/lib/text";
 
 export const CUSTOM_INSTRUCTIONS_MAX_LENGTH = 4000;
@@ -5,40 +6,15 @@ export const USER_MEMORY_CONTENT_MAX_LENGTH = 500;
 export const USER_MEMORY_DEFAULT_LIMIT = 50;
 export const USER_MEMORY_WARNING_THRESHOLD = 45;
 
-export interface UserWorkProfile {
-  custom_instructions: string;
-  memory_enabled: boolean;
-  updated_at: string | null;
-}
-
-export interface UpdateUserWorkProfileInput {
-  custom_instructions: string;
-  memory_enabled: boolean;
-}
-
-export type UserMemorySource = "manual" | "chat_explicit";
-
-export interface UserMemory {
-  id: string;
-  content: string;
-  source: UserMemorySource;
-  created_at: string;
-  updated_at: string;
-}
-
-export interface UserMemoryListResponse {
-  items: UserMemory[];
-  total: number;
-  limit: number;
-}
-
-export interface CreateUserMemoryInput {
-  content: string;
-}
-
-export interface UpdateUserMemoryInput {
-  content: string;
-}
+// 直连 OpenAPI 个人偏好与显式记忆契约。
+export type UserWorkProfile = ApiSchemas["UserWorkProfileResponse"];
+export type UpdateUserWorkProfileInput =
+  ApiSchemas["UpdateUserWorkProfileRequest"];
+export type UserMemory = ApiSchemas["UserMemoryResponse"];
+export type UserMemorySource = UserMemory["source"];
+export type UserMemoryListResponse = ApiSchemas["UserMemoryListResponse"];
+export type CreateUserMemoryInput = ApiSchemas["CreateUserMemoryRequest"];
+export type UpdateUserMemoryInput = ApiSchemas["UpdateUserMemoryRequest"];
 
 export interface WorkInstructionPreset {
   id: string;

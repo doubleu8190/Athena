@@ -1,276 +1,57 @@
-import type { ArtifactFileRef } from "../files/model";
-import type { SkillScope } from "../skills/model";
+import type { ApiSchemas } from "../../shared/api/client";
 
-export type MessageRole = "user" | "assistant";
+// 直连 OpenAPI 对话消息、Run 状态机、工具调用与子智能体契约。
+export type MessageRole = ApiSchemas["ConversationRole"];
+export type MessageStatus = ApiSchemas["MessageStatus"];
+export type RunStatus = ApiSchemas["RunStatus"];
+export type ToolKind = ApiSchemas["ToolKind"];
+export type ToolResultStatus = ApiSchemas["ToolResultStatus"];
 
-export type RunStatus =
-  | "queued"
-  | "running"
-  | "waiting_for_input"
-  | "waiting_for_approval"
-  | "waiting_for_subagents"
-  | "cancelling"
-  | "completed"
-  | "failed"
-  | "cancelled";
+export type TextMessagePart = ApiSchemas["TextPartResponse"];
+export type FileRefMessagePart = ApiSchemas["FileRefPartResponse"];
+export type ToolCallMessagePart = ApiSchemas["ToolCallPartResponse"];
+export type ToolResultMessagePart = ApiSchemas["ToolResultPartResponse"];
+export type ConversationMessagePart = ApiSchemas["MessagePartResponse"];
+export type ConversationMessage = ApiSchemas["ConversationMessageResponse"];
+export type ConversationMessagePage =
+  ApiSchemas["ConversationMessageListResponse"];
 
-export interface TextMessagePart {
-  type: "text";
-  text: string;
-}
-
-export interface FileRefMessagePart {
-  type: "file_ref";
-  file_id: string;
-  filename: string;
-  mime_type: string | null;
-  size_bytes: number | null;
-}
-
-export interface ToolCallMessagePart {
-  type: "tool_call";
-  tool_call_id: string;
-  name: string;
-  arguments: Record<string, unknown>;
-}
-
-export interface ToolResultMessagePart {
-  type: "tool_result";
-  tool_call_id: string;
-  status: string;
-  output: string | null;
-  artifacts: ArtifactFileRef[];
-}
-
-export type ConversationMessagePart =
-  | TextMessagePart
-  | FileRefMessagePart
-  | ToolCallMessagePart
-  | ToolResultMessagePart;
-
-export interface ConversationMessage {
-  id: string;
-  session_id: string;
-  role: string;
-  status: string;
-  sequence: number;
-  parts: ConversationMessagePart[];
-  reply_to_message_id: string | null;
-  run_id: string;
-  created_at: string;
-  completed_at: string | null;
-}
-
-export interface ConversationMessagePage {
-  items: ConversationMessage[];
-  next_before_sequence: number | null;
-}
-
-export interface RunUsageAttempt {
-  execution_epoch: number;
-  attempt: number;
-  input_tokens: number | null;
-  output_tokens: number | null;
-  total_tokens: number | null;
-  complete: boolean;
-  purpose: string;
-  operation_id: string | null;
-  batch_index: number;
-  model_profile_id: string | null;
-  duration_ms: number | null;
-}
-
-export interface RunUsage {
-  input_tokens: number | null;
-  output_tokens: number | null;
-  total_tokens: number | null;
-  complete: boolean;
-  attempts: RunUsageAttempt[];
-  answer_tokens: number | null;
-  compression_tokens: number | null;
-}
-
-export interface RunPendingInput {
-  id: string;
-  question_message_id: string;
-  status: string;
-  created_at: string;
-}
-
-export interface RunInputInteraction {
-  input_request_id: string;
-  status: string;
-  question_text: string;
-  answer_text: string | null;
-  created_at: string;
-  answered_at: string | null;
-}
-
-export interface FormattedToolArgument {
-  key: string;
-  label: string;
-  value: string;
-}
-
-export interface RunPendingApproval {
-  call_id: string;
-  batch_message_id: string;
-  ordinal: number;
-  model_name: string;
-  tool_kind: string | null;
-  requested_at: string;
-  safe_skill_projection: SafeSkillApprovalProjection | null;
-  display_name: string | null;
-  approval_summary: string | null;
-  formatted_arguments: FormattedToolArgument[];
-}
-
-export interface SafeSkillInputFile {
-  file_id: string;
-  filename: string;
-  mime_type: string | null;
-  size_bytes: number | null;
-  available: boolean;
-}
-
-export interface SkillParameterSummaryItem {
-  name: string;
-  label: string;
-  value: string;
-}
-
-export interface SafeSkillApprovalProjection {
-  call_id: string;
-  skill_id: string;
-  skill_name: string;
-  skill_version_id: string;
-  skill_version_label: string;
-  script_label: string;
-  purpose: string;
-  input_files: SafeSkillInputFile[];
-  parameter_summary: SkillParameterSummaryItem[];
-  hidden_parameter_count: number;
-  can_approve: boolean;
-  unavailable_reason: string | null;
-}
-
-export interface RunSkillEntry {
-  skill_id: string;
-  slug: string;
-  name: string;
-  description: string;
-  version_id: string;
-  version_label: string;
-  requires_approval: boolean;
-  scope: SkillScope;
-}
-
-export interface RunModelSnapshot {
-  id: string;
-  name: string;
-  model: string;
-  scenario_label: string | null;
-  supports_vision: boolean;
-  version: number;
-}
-
-export interface RunSkillSnapshot {
-  version: number;
-  skills: RunSkillEntry[];
-  selected_skill_ids: string[];
-}
-
-export interface SubagentTaskSummary {
-  sub_run_id: string;
-  parent_tool_call_id: string;
-  subagent_profile_id: string | null;
-  subagent_slug: string;
-  subagent_name: string;
-  task_index: number;
-  task_summary: string;
-  status: RunStatus;
-  safe_error_code: string | null;
-  created_at: string;
-  first_started_at: string | null;
-  finished_at: string | null;
-}
-
-export interface PendingSubagentInput {
-  sub_run_id: string;
-  subagent_slug: string;
-  subagent_name: string;
-  task_index: number;
-  task_summary: string;
-  input_request_id: string;
-  question_message_id: string;
-  question_text: string;
-  created_at: string;
-}
-
-export interface PendingSubagentApproval {
-  sub_run_id: string;
-  subagent_slug: string;
-  subagent_name: string;
-  task_index: number;
-  task_summary: string;
-  call_id: string;
-  batch_message_id: string;
-  ordinal: number;
-  model_name: string;
-  tool_kind: string | null;
-  requested_at: string;
-  safe_skill_projection: SafeSkillApprovalProjection | null;
-  display_name: string | null;
-  approval_summary: string | null;
-  formatted_arguments: FormattedToolArgument[];
-}
-
-export interface Run {
-  id: string;
-  session_id: string;
-  status: RunStatus;
-  trigger_message_id: string;
-  context_cutoff_sequence: number;
-  retry_of_run_id: string | null;
-  model_config_version_id: string;
-  prompt_template_version: string;
-  event_sequence: number;
-  execution_epoch: number;
-  queued_at: string;
-  first_started_at: string | null;
-  finished_at: string | null;
-  created_at: string;
-  updated_at: string;
-  cancel_requested_at: string | null;
-  safe_error_code: string | null;
-  report_message_id: string | null;
-  assistant_message_id: string | null;
-  usage: RunUsage;
-  pending_input: RunPendingInput | null;
-  pending_approvals: RunPendingApproval[];
-  skill_snapshot: RunSkillSnapshot | null;
-  input_file_ids: string[];
-  knowledge_base_ids: string[] | null;
-  model_snapshot: RunModelSnapshot;
-  parent_run_id: string | null;
-  root_run_id: string | null;
-  parent_tool_call_id: string | null;
-  depth: number;
-  subagent_profile_id: string | null;
-  subagent_slug: string | null;
-  subagent_name: string | null;
-  subagent_tasks: SubagentTaskSummary[];
-  pending_subagent_inputs: PendingSubagentInput[];
-  pending_subagent_approvals: PendingSubagentApproval[];
-  input_interactions: RunInputInteraction[];
-  replayed: boolean;
-  retry_warning: string | null;
-}
-
-export interface RunListResponse {
-  items: Run[];
-  next_cursor: string | null;
-}
+export type RunUsageAttempt = ApiSchemas["RunAttemptUsageResponse"];
+export type RunUsage = ApiSchemas["RunUsageResponse"];
+export type RunPendingInput = ApiSchemas["RunInputRequestResponse"];
+export type RunInputInteraction = ApiSchemas["RunInputInteractionResponse"];
+export type FormattedToolArgument = ApiSchemas["FormattedToolArgumentResponse"];
+export type RunPendingApproval = ApiSchemas["RunPendingToolApprovalResponse"];
+export type SafeSkillInputFile = ApiSchemas["SafeSkillInputFileResponse"];
+export type SkillParameterSummaryItem =
+  ApiSchemas["SkillParameterSummaryItemResponse"];
+export type SafeSkillApprovalProjection =
+  ApiSchemas["SafeSkillApprovalProjectionResponse"];
+export type RunSkillEntry = ApiSchemas["RunSkillEntryResponse"];
+export type RunModelSnapshot = ApiSchemas["RunModelSnapshotResponse"];
+export type RunSkillSnapshot = ApiSchemas["RunSkillSnapshotResponse"];
+export type SubagentTaskSummary = ApiSchemas["SubagentTaskResponse"];
+export type PendingSubagentInput = ApiSchemas["PendingSubagentInputResponse"];
+export type PendingSubagentApproval =
+  ApiSchemas["PendingSubagentApprovalResponse"];
+export type Run = ApiSchemas["RunResponse"];
+export type RunListResponse = ApiSchemas["RunListResponse"];
+export type RunEvent = ApiSchemas["RunEventResponse"];
+export type RunEventListResponse = ApiSchemas["RunEventListResponse"];
+export type RunToolOutcome = ApiSchemas["RunToolOutcomeResponse"];
+// 后端 RunToolCallSummaryResponse 尚未返回 display_name，保留前端可选展示名扩展以兼容业务化步骤标题。
+export type RunToolCallSummary = ApiSchemas["RunToolCallSummaryResponse"] & {
+  display_name?: string | null;
+};
+export type RunToolCallDetail = ApiSchemas["RunToolCallDetailResponse"] & {
+  display_name?: string | null;
+};
+export type RunToolCallListResponse = Omit<
+  ApiSchemas["RunToolCallListResponse"],
+  "items"
+> & {
+  items: RunToolCallSummary[];
+};
 
 export type RunContextStopReason =
   | "no_compressible_history"
@@ -289,25 +70,11 @@ export interface RunFailedEventPayload {
   context_stop_reason?: RunContextStopReason | null;
 }
 
-export interface RunEvent {
-  id: string;
-  run_id: string;
-  sequence: number;
-  type: string;
-  created_at: string;
-  payload: Record<string, unknown>;
-}
-
-export interface RunEventListResponse {
-  items: RunEvent[];
-  next_after_sequence: number | null;
-}
-
 export interface RunStreamMessage {
   id: string;
   session_id: string;
   role: MessageRole;
-  status: string;
+  status: MessageStatus;
   text: string;
   sequence: number;
   created_at: string;
@@ -334,43 +101,6 @@ export interface RunSnapshotPayload {
   subagent_tasks?: SubagentTaskSummary[];
   pending_subagent_inputs?: PendingSubagentInput[];
   pending_subagent_approvals?: PendingSubagentApproval[];
-}
-
-export interface RunToolOutcome {
-  status: string;
-  code: string;
-  message: string;
-  data: Record<string, unknown>;
-  truncated: boolean;
-  cleanup_error_code: string | null;
-}
-
-export interface RunToolCallSummary {
-  id: string;
-  tool_call_id: string;
-  ordinal: number;
-  tool_id: string | null;
-  tool_kind: string | null;
-  model_name: string;
-  display_name?: string | null;
-  status: string;
-  started_at: string | null;
-  finished_at: string | null;
-  duration_ms: number | null;
-  safe_error_code: string | null;
-  truncated: boolean;
-}
-
-export interface RunToolCallDetail extends RunToolCallSummary {
-  arguments: Record<string, unknown> | null;
-  outcome: RunToolOutcome | null;
-  artifacts: ArtifactFileRef[];
-  safe_skill_projection: SafeSkillApprovalProjection | null;
-}
-
-export interface RunToolCallListResponse {
-  items: RunToolCallSummary[];
-  next_after_ordinal: number | null;
 }
 
 export const ACTIVE_RUN_STATUSES: ReadonlySet<RunStatus> = new Set([

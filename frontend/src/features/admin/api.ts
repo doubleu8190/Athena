@@ -12,14 +12,10 @@ import type {
   AdminToolListResponse,
   CompressionPolicy,
   CompressionPolicyInput,
-  McpHttpConfig,
-  McpSecretMetadata,
   McpServer,
   McpServerListResponse,
   McpServerUpdateInput,
   McpServerWriteInput,
-  McpStdioConfig,
-  McpTransport,
   ModelProfile,
   ModelProfileCreateInput,
   ModelProfileListResponse,
@@ -32,97 +28,36 @@ import type {
   SystemPromptKind,
   SystemPromptVersion,
   SystemPromptVersionListResponse,
-  TokenizerEncoding,
 } from "./model";
 
-function toTokenizerEncoding(value: string): TokenizerEncoding {
-  return value === "cl100k_base" ? "cl100k_base" : "o200k_base";
+export function listModelProfiles(): Promise<ModelProfileListResponse> {
+  return apiGet("/api/v1/admin/llm/model-profiles");
 }
 
-function toModelProfile(raw: ApiSchemas["ModelProfileResponse"]): ModelProfile {
-  return {
-    ...raw,
-    tokenizer_encoding: toTokenizerEncoding(raw.tokenizer_encoding),
-  };
-}
-
-function toMcpTransport(value: string): McpTransport {
-  return value === "stdio" ? "stdio" : "streamable_http";
-}
-
-function toMcpConfig(
-  transport: McpTransport,
-  raw: Record<string, unknown>,
-): McpHttpConfig | McpStdioConfig {
-  if (transport === "stdio") {
-    return {
-      args: Array.isArray(raw.args)
-        ? raw.args.filter((item): item is string => typeof item === "string")
-        : [],
-      command: typeof raw.command === "string" ? raw.command : "",
-      cwd: typeof raw.cwd === "string" ? raw.cwd : null,
-    };
-  }
-  return {
-    url: typeof raw.url === "string" ? raw.url : "",
-  };
-}
-
-function toMcpSecrets(raw: Record<string, unknown>[]): McpSecretMetadata[] {
-  return raw.map((item) => ({
-    has_value: Boolean(item.has_value),
-    name: typeof item.name === "string" ? item.name : "",
-  }));
-}
-
-function toMcpServer(raw: ApiSchemas["McpServerResponse"]): McpServer {
-  const transport = toMcpTransport(raw.transport);
-  return {
-    ...raw,
-    config: toMcpConfig(transport, raw.config),
-    secrets: toMcpSecrets(raw.secrets),
-    transport,
-  };
-}
-
-export async function listModelProfiles(): Promise<ModelProfileListResponse> {
-  const response = await apiGet("/api/v1/admin/llm/model-profiles");
-  return {
-    default_profile_id: response.default_profile_id,
-    items: response.items.map(toModelProfile),
-  };
-}
-
-export async function createModelProfile(
+export function createModelProfile(
   input: ModelProfileCreateInput,
 ): Promise<ModelProfile> {
-  return toModelProfile(
-    await apiPost("/api/v1/admin/llm/model-profiles", {
-      body: input,
-    }),
-  );
+  return apiPost("/api/v1/admin/llm/model-profiles", {
+    body: input,
+  });
 }
 
-export async function setModelProfileEnabled(
+export function setModelProfileEnabled(
   profileId: string,
   enabled: boolean,
 ): Promise<ModelProfile> {
-  return toModelProfile(
-    await apiPut("/api/v1/admin/llm/model-profiles/{profile_id}/enabled", {
-      body: { enabled },
-      params: { path: { profile_id: profileId } },
-    }),
-  );
+  return apiPut("/api/v1/admin/llm/model-profiles/{profile_id}/enabled", {
+    body: { enabled },
+    params: { path: { profile_id: profileId } },
+  });
 }
 
-export async function setDefaultModelProfile(
+export function setDefaultModelProfile(
   profileId: string,
 ): Promise<ModelProfile> {
-  return toModelProfile(
-    await apiPut("/api/v1/admin/llm/model-profiles/default", {
-      body: { profile_id: profileId },
-    }),
-  );
+  return apiPut("/api/v1/admin/llm/model-profiles/default", {
+    body: { profile_id: profileId },
+  });
 }
 
 export function getCompressionPolicy(): Promise<CompressionPolicy> {
@@ -137,37 +72,29 @@ export function updateCompressionPolicy(
   });
 }
 
-export async function listMcpServers(
+export function listMcpServers(
   query: AdminPageQuery,
 ): Promise<McpServerListResponse> {
-  const response = await apiGet("/api/v1/admin/mcp/servers", {
+  return apiGet("/api/v1/admin/mcp/servers", {
     params: { query: { page: query.page, page_size: query.pageSize } },
   });
-  return {
-    ...response,
-    items: response.items.map(toMcpServer),
-  };
 }
 
-export async function getMcpServer(serverId: string): Promise<McpServer> {
-  return toMcpServer(
-    await apiGet("/api/v1/admin/mcp/servers/{server_id}", {
-      params: { path: { server_id: serverId } },
-    }),
-  );
+export function getMcpServer(serverId: string): Promise<McpServer> {
+  return apiGet("/api/v1/admin/mcp/servers/{server_id}", {
+    params: { path: { server_id: serverId } },
+  });
 }
 
-export async function createMcpServer(
+export function createMcpServer(
   input: McpServerWriteInput,
 ): Promise<McpServer> {
-  return toMcpServer(
-    await apiPost("/api/v1/admin/mcp/servers", {
-      body: input,
-    }),
-  );
+  return apiPost("/api/v1/admin/mcp/servers", {
+    body: input,
+  });
 }
 
-export async function updateMcpServer(
+export function updateMcpServer(
   serverId: string,
   input: McpServerUpdateInput,
 ): Promise<McpServer> {
@@ -184,12 +111,10 @@ export async function updateMcpServer(
           ...input.server,
           expected_config_version: input.expected_config_version,
         };
-  return toMcpServer(
-    await apiPut("/api/v1/admin/mcp/servers/{server_id}", {
-      body,
-      params: { path: { server_id: serverId } },
-    }),
-  );
+  return apiPut("/api/v1/admin/mcp/servers/{server_id}", {
+    body,
+    params: { path: { server_id: serverId } },
+  });
 }
 
 export function listAdminTools(

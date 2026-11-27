@@ -7,13 +7,25 @@ import unicodedata
 
 AUTO_TITLE_MAX_CHARS = 20
 AUTO_TITLE_FALLBACK_MAX_CHARS = 24
-AUTO_TITLE_TIMEOUT_SECONDS = 5.0
+# 为思考模型预留充裕的推理与最终标题输出空间（后台异步执行，不阻塞主 Run 流式响应）。
+AUTO_TITLE_MAX_OUTPUT_TOKENS = 512
+AUTO_TITLE_TIMEOUT_SECONDS = 15.0
 AUTO_TITLE_PROMPT_INPUT_MAX_CHARS = 2000
 
 AUTO_TITLE_SYSTEM_PROMPT = (
     "请根据用户的首条消息生成一个简洁的中文对话标题，"
     "长度不超过 20 个字，仅输出标题正文，不要加引号、书名号、序号或任何解释。"
 )
+
+
+def build_auto_title_user_prompt(excerpt: str) -> str:
+    """将截取后的用户首条消息明确包裹为待提炼原文，防止思考/对话模型将其当作问答指令直接作答。"""
+    return (
+        "请仅提炼以下用户首条消息的中文对话标题（不超过 20 个字），"
+        "不要回答或解释消息本身内容：\n\n"
+        f"<用户首条消息>\n{excerpt.strip()}\n</用户首条消息>"
+    )
+
 
 _WHITESPACE_PATTERN = re.compile(r"\s+")
 _SURROUNDING_QUOTES = "\"'`“”‘’「」『』《》〈〉【】"
@@ -63,9 +75,11 @@ def fallback_title_from_message(text: str) -> str:
 __all__ = [
     "AUTO_TITLE_FALLBACK_MAX_CHARS",
     "AUTO_TITLE_MAX_CHARS",
+    "AUTO_TITLE_MAX_OUTPUT_TOKENS",
     "AUTO_TITLE_PROMPT_INPUT_MAX_CHARS",
     "AUTO_TITLE_SYSTEM_PROMPT",
     "AUTO_TITLE_TIMEOUT_SECONDS",
+    "build_auto_title_user_prompt",
     "fallback_title_from_message",
     "sanitize_generated_title",
 ]

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import itertools
+import logging
 from collections.abc import AsyncIterator, Callable, Coroutine
 from contextlib import asynccontextmanager, redirect_stdout
 from datetime import UTC, datetime, timedelta
@@ -56,7 +57,14 @@ from app.knowledge.service import KnowledgeService
 from app.llm import ModelProfileService
 from app.project.knowledge import ProjectKnowledgeService
 from app.project.service import ProjectService
-from app.run.auto_title import fallback_title_from_message, sanitize_generated_title
+from app.run.auto_title import (
+    AUTO_TITLE_MAX_OUTPUT_TOKENS,
+    AUTO_TITLE_TIMEOUT_SECONDS,
+    build_auto_title_user_prompt,
+    fallback_title_from_message,
+    sanitize_generated_title,
+)
+from app.run.auto_title_runner import AutoTitleRunner
 from app.run.config import RunWorkerConfig
 from app.run.context import LlmRequestSpec, measure_llm_request
 from app.run.executor import RunExecutor
@@ -79,7 +87,7 @@ from domain.llm.model import (
     LlmUsage,
     ResponseCompleted,
 )
-from domain.llm.model.profile import RuntimeModelProfile
+from domain.llm.model.profile import ModelProfileVersion, RuntimeModelProfile
 from domain.mcp import McpCallResult, McpCallStatus, McpRuntimeToolTarget, McpSecretPurpose
 from domain.org import DepartmentStatus
 from domain.run.model import RunStatus
@@ -2098,7 +2106,14 @@ def test_run_executor_injects_project_instructions_for_main_run_only_and_meters_
 
 
 def test_auto_title_sanitization_and_fallback_helpers() -> None:
-    """验证标题清洗（引号、书名号、换行、控制字符、末尾标点、20字截断）与 24 字降级。"""
+    """验证标题清洗、思考模型预算/超时常量、提示词包裹与 24 字降级规则。"""
+    assert AUTO_TITLE_MAX_OUTPUT_TOKENS == 512
+    assert AUTO_TITLE_TIMEOUT_SECONDS == 15.0
+
+    wrapped = build_auto_title_user_prompt("  今天北京天气怎么样？请告诉我。  ")
+    assert "不要回答或解释消息本身内容" in wrapped
+    assert "<用户首条消息>\n今天北京天气怎么样？请告诉我。\n</用户首条消息>" in wrapped
+
     assert sanitize_generated_title('  "《季度研发复盘报告》。"\n\x07 ') == "季度研发复盘报告"
     assert sanitize_generated_title("「『多引号标题』！」") == "多引号标题"
     long_title = sanitize_generated_title("这是一个长度明显超过二十个汉字上限的模型生成标题示例")
@@ -2111,6 +2126,184 @@ def test_auto_title_sanitization_and_fallback_helpers() -> None:
     assert "\n" not in fallback and "\t" not in fallback and "\x07" not in fallback
     assert len(fallback) == 24
     assert fallback == "帮我整理 2026年第四季度企业知识库架构升级与"
+
+
+def test_auto_title_runner_thinking_model_budget_and_diagnostic_fallbacks(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """验证思考模型高 token 预算、小配额上限收敛，以及失败/未完成/空输出降级与日志脱敏。"""
+
+    def _runtime(
+        profile_id: str,
+        *,
+        max_output_tokens: int,
+        request_timeout_seconds: int = 60,
+    ) -> RuntimeModelProfile:
+        return RuntimeModelProfile(
+            version=ModelProfileVersion(
+                id=profile_id,
+                name=profile_id,
+                protocol="chat_completions",
+                base_url="https://api.example.invalid/v1",
+                model="deepseek-reasoner",
+                context_window_tokens=32768,
+                tokenizer_encoding="o200k_base",
+                supports_stream=True,
+                supports_tools=True,
+                max_output_tokens=max_output_tokens,
+                request_timeout_seconds=request_timeout_seconds,
+                execution_timeout_seconds=120,
+                max_concurrency=4,
+                temperature=0.2,
+                enabled=True,
+                created_at=NOW,
+                updated_at=NOW,
+            ),
+            api_key="sk-runtime-secret-must-not-leak",
+        )
+
+    class _MemProfiles:
+        def __init__(self, runtime: RuntimeModelProfile) -> None:
+            self._runtime = runtime
+
+        async def get_current_compression_policy(self) -> Any:
+            return None
+
+        async def get_runtime(self, profile_id: str) -> RuntimeModelProfile | None:
+            return self._runtime if profile_id == self._runtime.version.id else None
+
+    async def scenario() -> None:
+        # 1) 思考模型（max_output_tokens=4096）：标题预算应为 512，超时为 15.0，且使用包裹提示词。
+        thinking_runtime = _runtime("llmprof_thinking", max_output_tokens=4096)
+        provider_ok = _ScriptedLlmProvider(
+            complete_handler=lambda _rt, _req: asyncio.sleep(
+                0, result=_text_response("思考模型标题")
+            ),
+        )
+        runner_ok = AutoTitleRunner(
+            profiles=cast(Any, _MemProfiles(thinking_runtime)),
+            provider=cast(Any, provider_ok),
+            sessions=None,
+        )
+        title_ok = await runner_ok._generate_auto_title(
+            run_model_profile_id="llmprof_thinking",
+            trigger_text="请解释如何优化分布式事务一致性",
+        )
+        assert title_ok == "思考模型标题"
+        assert len(provider_ok.complete_requests) == 1
+        req_ok = provider_ok.complete_requests[0][1]
+        assert req_ok.max_output_tokens == 512
+        assert req_ok.timeout_seconds == 15.0
+        assert req_ok.messages[1].content == build_auto_title_user_prompt(
+            "请解释如何优化分布式事务一致性"
+        )
+
+        # 2) 模型自身 max_output_tokens < 512 时取较小值 min(512, 256) == 256。
+        small_runtime = _runtime("llmprof_small", max_output_tokens=256, request_timeout_seconds=10)
+        provider_small = _ScriptedLlmProvider(
+            complete_handler=lambda _rt, _req: asyncio.sleep(
+                0, result=_text_response("小配额标题")
+            ),
+        )
+        runner_small = AutoTitleRunner(
+            profiles=cast(Any, _MemProfiles(small_runtime)),
+            provider=cast(Any, provider_small),
+            sessions=None,
+        )
+        assert (
+            await runner_small._generate_auto_title(
+                run_model_profile_id="llmprof_small",
+                trigger_text="你好，帮我看下日志",
+            )
+            == "小配额标题"
+        )
+        assert provider_small.complete_requests[0][1].max_output_tokens == 256
+        assert provider_small.complete_requests[0][1].timeout_seconds == 10.0
+
+        # 3) status != "completed" 触发降级并记录诊断字段。
+        async def _incomplete_complete(
+            runtime: RuntimeModelProfile, request: LlmRequest
+        ) -> LlmResponse:
+            del runtime, request
+            return LlmResponse(
+                output=(),
+                status="incomplete",
+                incomplete_reason="max_output_tokens",
+                model="deepseek-reasoner",
+                response_id="resp_inc",
+                request_id="req_inc",
+                usage=LlmUsage(input_tokens=20, output_tokens=512, total_tokens=532),
+            )
+
+        runner_inc = AutoTitleRunner(
+            profiles=cast(Any, _MemProfiles(thinking_runtime)),
+            provider=cast(Any, _ScriptedLlmProvider(complete_handler=_incomplete_complete)),
+            sessions=None,
+        )
+        with caplog.at_level(logging.WARNING, logger="app.run.auto_title_runner"):
+            caplog.clear()
+            inc_title = await runner_inc._generate_auto_title(
+                run_model_profile_id="llmprof_thinking",
+                trigger_text="这是一条需要降级的超长用户提问消息内容测试",
+            )
+        assert inc_title == "这是一条需要降级的超长用户提问消息内容测试"
+        assert "session_auto_title_incomplete_fallback" in caplog.text
+        assert "incomplete_reason=max_output_tokens" in caplog.text
+
+        # 4) 空输出触发降级并记录 raw_length=0。
+        runner_empty = AutoTitleRunner(
+            profiles=cast(Any, _MemProfiles(thinking_runtime)),
+            provider=cast(
+                Any,
+                _ScriptedLlmProvider(
+                    complete_handler=lambda _rt, _req: asyncio.sleep(
+                        0, result=_text_response("   ")
+                    )
+                ),
+            ),
+            sessions=None,
+        )
+        with caplog.at_level(logging.WARNING, logger="app.run.auto_title_runner"):
+            caplog.clear()
+            empty_title = await runner_empty._generate_auto_title(
+                run_model_profile_id="llmprof_thinking",
+                trigger_text="空输出兜底验证消息",
+            )
+        assert empty_title == "空输出兜底验证消息"
+        assert "session_auto_title_empty_output_fallback" in caplog.text
+        assert "raw_length=3" in caplog.text
+
+        # 5) 异常降级：日志中记录脱敏截断的 error_detail，严禁包含 API Key 或用户原始正文。
+        async def _err_complete(runtime: RuntimeModelProfile, request: LlmRequest) -> LlmResponse:
+            del runtime, request
+            raise LlmProviderError(
+                "upstream failed with Bearer top-secret-bearer-token and sk-secretkey1234567890 "
+                + ("x" * 200)
+            )
+
+        runner_err = AutoTitleRunner(
+            profiles=cast(Any, _MemProfiles(thinking_runtime)),
+            provider=cast(Any, _ScriptedLlmProvider(complete_handler=_err_complete)),
+            sessions=None,
+        )
+        sensitive_user_msg = "绝对不能出现在日志里的用户机密正文内容"
+        with caplog.at_level(logging.WARNING, logger="app.run.auto_title_runner"):
+            caplog.clear()
+            err_title = await runner_err._generate_auto_title(
+                run_model_profile_id="llmprof_thinking",
+                trigger_text=sensitive_user_msg,
+            )
+        assert err_title == sensitive_user_msg
+        assert "session_auto_title_llm_fallback" in caplog.text
+        assert "error_detail=" in caplog.text
+        assert "[REDACTED]" in caplog.text
+        assert "sk-secretkey1234567890" not in caplog.text
+        assert "top-secret-bearer-token" not in caplog.text
+        assert sensitive_user_msg not in caplog.text
+        detail_part = caplog.text.split("error_detail=", maxsplit=1)[1].strip()
+        assert len(detail_part) <= 120
+
+    _run(scenario())
 
 
 def test_auto_title_generation_compression_model_priority_and_manual_title_protection(
@@ -2230,6 +2423,12 @@ def test_auto_title_generation_compression_model_priority_and_manual_title_prote
 
             assert len(provider.complete_requests) == 1
             assert provider.complete_requests[0][0] == "llmprof_compress"
+            title_req = provider.complete_requests[0][1]
+            assert title_req.max_output_tokens == AUTO_TITLE_MAX_OUTPUT_TOKENS
+            assert title_req.timeout_seconds == AUTO_TITLE_TIMEOUT_SECONDS
+            assert title_req.messages[1].content == build_auto_title_user_prompt(
+                "请帮我设计一套企业级分布式缓存架构方案"
+            )
             updated_sess = await sessions_repo.get_visible(
                 cast(Any, type("_Scope", (), {"session_id": "sess_auto_1", "owner_id": "usr_rd"})())
             )

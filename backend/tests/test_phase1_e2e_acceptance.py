@@ -76,6 +76,11 @@ from app.org import (
 from app.preference import PreferenceService
 from app.project.knowledge import ProjectKnowledgeService
 from app.project.service import ProjectService
+from app.run.auto_title import (
+    AUTO_TITLE_MAX_OUTPUT_TOKENS,
+    AUTO_TITLE_TIMEOUT_SECONDS,
+    build_auto_title_user_prompt,
+)
 from app.run.config import RunWorkerConfig
 from app.run.executor import RunExecutor
 from app.run.service import RunService
@@ -1755,9 +1760,15 @@ def test_e2e_4_projectless_dialogue_scenario_models_auto_title_and_explicit_memo
             assert del_mem.status_code == 204
             assert fin_member.get("/api/v1/me/memories").json()["items"] == []
 
-            # 8. 校验自动标题优先选用压缩模型生成、经清洗后长度 <= 20 字。
+            # 8. 校验自动标题优先选用压缩模型生成、预算/提示词兼容思考模型且经清洗后长度 <= 20 字。
             assert len(provider.complete_requests) == 1
             assert provider.complete_requests[0][0] == compress_model["id"]
+            title_req = provider.complete_requests[0][1]
+            assert title_req.max_output_tokens == AUTO_TITLE_MAX_OUTPUT_TOKENS
+            assert title_req.timeout_seconds == AUTO_TITLE_TIMEOUT_SECONDS
+            assert title_req.messages[1].content == build_auto_title_user_prompt(
+                "帮我查一下一线城市差旅报销标准，并记住我后续周报都用万元为单位。"
+            )
             titled_session = fin_member.get(f"/api/v1/sessions/{session_id}").json()
             assert titled_session["title"] == "差旅报销标准与周报单位偏好"
             assert len(titled_session["title"]) <= 20

@@ -4,12 +4,15 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from typing import TYPE_CHECKING
 
 from app.run.auto_title import (
+    AUTO_TITLE_MAX_OUTPUT_TOKENS,
     AUTO_TITLE_PROMPT_INPUT_MAX_CHARS,
     AUTO_TITLE_SYSTEM_PROMPT,
     AUTO_TITLE_TIMEOUT_SECONDS,
+    build_auto_title_user_prompt,
     fallback_title_from_message,
     sanitize_generated_title,
 )
@@ -23,6 +26,15 @@ if TYPE_CHECKING:
     from adapter.session.repository import SqlAlchemySessionRepository
 
 logger = logging.getLogger(__name__)
+
+_SECRET_PATTERN = re.compile(r"(?i)(bearer\s+\S+|sk-[A-Za-z0-9_-]{6,})")
+
+
+def _sanitize_error_detail(error: BaseException) -> str:
+    """折叠空白、脱敏常见凭据片段并截取前 120 字符，避免日志泄漏密钥或换行注入。"""
+    compact = " ".join(str(error).split())
+    masked = _SECRET_PATTERN.sub("[REDACTED]", compact)
+    return masked[:120]
 
 
 class AutoTitleRunner:
@@ -133,14 +145,15 @@ class AutoTitleRunner:
         if runtime is None:
             return fallback
 
+        # 将用户首条消息明确包裹为待提炼原文，并分配足够的 output token 预算以兼容思考模型。
         request = LlmRequest(
             model_profile=runtime.version.id,
             messages=(
                 LlmMessage(role=LlmRole.SYSTEM, content=AUTO_TITLE_SYSTEM_PROMPT),
-                LlmMessage(role=LlmRole.USER, content=excerpt),
+                LlmMessage(role=LlmRole.USER, content=build_auto_title_user_prompt(excerpt)),
             ),
             tool_choice="none",
-            max_output_tokens=min(64, runtime.version.max_output_tokens),
+            max_output_tokens=min(AUTO_TITLE_MAX_OUTPUT_TOKENS, runtime.version.max_output_tokens),
             temperature=(
                 0.2 if runtime.version.temperature is None else runtime.version.temperature
             ),
@@ -156,14 +169,30 @@ class AutoTitleRunner:
             raise
         except Exception as error:
             logger.warning(
-                "session_auto_title_llm_fallback model_profile_id=%s exception_type=%s",
+                "session_auto_title_llm_fallback model_profile_id=%s "
+                "exception_type=%s error_detail=%s",
                 runtime.version.id,
                 type(error).__name__,
+                _sanitize_error_detail(error),
             )
             return fallback
 
         if response.status != "completed":
+            logger.warning(
+                "session_auto_title_incomplete_fallback model_profile_id=%s "
+                "status=%s incomplete_reason=%s",
+                runtime.version.id,
+                response.status,
+                response.incomplete_reason,
+            )
             return fallback
         raw_text = "".join(part.text for part in response.output if isinstance(part, LlmText))
         cleaned = sanitize_generated_title(raw_text)
-        return cleaned or fallback
+        if not cleaned:
+            logger.warning(
+                "session_auto_title_empty_output_fallback model_profile_id=%s raw_length=%d",
+                runtime.version.id,
+                len(raw_text),
+            )
+            return fallback
+        return cleaned

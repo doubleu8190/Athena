@@ -82,6 +82,8 @@ class _PidReportingParser(DocumentParser):
             raise RuntimeError("leaked /etc/secret/path details")
         if filename == "slow.txt":
             time.sleep(10.0)
+        if filename.startswith("delay:"):
+            time.sleep(float(filename.split(":", 1)[1]))
         if filename == "crash.txt":
             os._exit(1)
         return ParsedDocument(
@@ -1215,15 +1217,14 @@ def test_isolated_parser_pool_reuses_recycles_handles_errors_and_closes_cleanly(
         )
         try:
             pid_before_timeout, _ = _parse_meta(await pool.parse("ok_before.txt", b"x"))
-            assert pool._current is not None
-            stuck_processes = list((getattr(pool._current, "_processes", None) or {}).values())
-            assert stuck_processes and any(proc.is_alive() for proc in stuck_processes)
+            stuck_processes = list(pool.active_processes())
+            assert stuck_processes and all(proc.is_alive() for proc in stuck_processes)
 
             with pytest.raises(TimeoutError, match="knowledge_parse_timeout"):
                 await pool.parse("slow.txt", b"x")
             # 超时后旧池卡死子进程已被显式强杀回收，不会遗留后台阻塞进程。
             assert all(not proc.is_alive() for proc in stuck_processes)
-            assert pool._current is None
+            assert pool.active_processes() == ()
 
             pid_after_timeout, _ = _parse_meta(await pool.parse("ok_after_timeout.txt", b"x"))
             assert pid_after_timeout > 0
@@ -1231,7 +1232,7 @@ def test_isolated_parser_pool_reuses_recycles_handles_errors_and_closes_cleanly(
 
             with pytest.raises(RuntimeError, match="knowledge_parser_process_failed"):
                 await pool.parse("crash.txt", b"x")
-            assert pool._current is None
+            assert pool.active_processes() == ()
 
             pid_after_crash, _ = _parse_meta(await pool.parse("ok_after_crash.txt", b"x"))
             assert pid_after_crash != pid_after_timeout
@@ -1248,8 +1249,7 @@ def test_isolated_parser_pool_reuses_recycles_handles_errors_and_closes_cleanly(
             timeout_seconds=15,
         )
         await pool.parse("gc.txt", b"x")
-        assert pool._current is not None
-        processes = list((getattr(pool._current, "_processes", None) or {}).values())
+        processes = list(pool.active_processes())
         assert processes and all(proc.is_alive() for proc in processes)
         return processes
 
@@ -1259,8 +1259,8 @@ def test_isolated_parser_pool_reuses_recycles_handles_errors_and_closes_cleanly(
 
 
 @pytest.mark.skipif(os.name == "nt", reason="spawn CLI import differs on Windows")
-def test_isolated_parser_pool_concurrent_recycle_still_kills_timed_out_sibling() -> None:
-    """max_workers=2 下同池一任务触发脏轮换退位后，卡死的兄弟任务超时仍须 100% 强杀回收。"""
+def test_isolated_parser_pool_concurrent_recycle_rotates_only_dirty_worker() -> None:
+    """max_workers=2 下单任务触发 should_recycle=True 仅轮换自身并释放旧 PID，绝不误杀在途兄弟。"""
 
     def _parse_meta(doc: ParsedDocument) -> tuple[int, int]:
         parts = dict(item.split("=", 1) for item in doc.blocks[0].text.split(";"))
@@ -1270,39 +1270,94 @@ def test_isolated_parser_pool_concurrent_recycle_still_kills_timed_out_sibling()
         pool = _IsolatedParserPool(
             _PidReportingParserFactory(),
             max_workers=2,
-            timeout_seconds=2,
+            timeout_seconds=10,
         )
         try:
-            # 预热初始进程池并抓取旧池引用，随后并发提交卡死慢任务与触发脏轮换的失败任务。
-            await pool.parse("warmup.txt", b"x")
-            old_executor = pool._current
-            assert old_executor is not None
+            # 并发预热两个独立子进程槽位并记录各自的进程句柄与 PID。
+            warmup_docs = await asyncio.gather(
+                pool.parse("delay:0.2", b"x"),
+                pool.parse("delay:0.2", b"x"),
+            )
+            warmup_pids = {_parse_meta(doc)[0] for doc in warmup_docs}
+            assert len(warmup_pids) == 2
+            initial_procs = pool.active_processes()
+            assert len(initial_procs) == 2
 
-            slow_task = asyncio.create_task(pool.parse("slow.txt", b"x"))
+            # 同时提交一个耗时健康任务与一个触发 should_recycle=True 的失败任务。
+            healthy_task = asyncio.create_task(pool.parse("delay:0.6", b"x"))
             boom_task = asyncio.create_task(pool.parse("boom.txt", b"x"))
 
             with pytest.raises(RuntimeError, match="knowledge_parser_transient"):
                 await boom_task
 
-            # boom.txt 仅将旧池退位（self._current 置空），不得提前清空 _processes。
-            assert pool._current is None
-            assert old_executor in pool._executors
-            old_processes = list((getattr(old_executor, "_processes", None) or {}).values())
-            assert old_processes and any(proc.is_alive() for proc in old_processes)
-            old_pids = {proc.pid for proc in old_processes if proc.pid is not None}
+            # 脏任务仅淘汰并释放自身旧进程，健康兄弟进程仍保持存活且仍在 active_processes 中。
+            dead_procs = [proc for proc in initial_procs if not proc.is_alive()]
+            alive_procs = [proc for proc in initial_procs if proc.is_alive()]
+            assert len(dead_procs) == 1
+            assert len(alive_procs) == 1
+            assert pool.active_processes() == (alive_procs[0],)
+            dead_pid = dead_procs[0].pid
+            surviving_pid = alive_procs[0].pid
+            assert dead_pid is not None and surviving_pid is not None
 
-            # 随后慢兄弟任务超时，必须完整快照并强杀旧池全部子进程且将其移出跟踪集合。
+            # 在途健康兄弟任务必须不受影响正常完成，且仍由存活的同一 PID 处理。
+            healthy_pid, _ = _parse_meta(await healthy_task)
+            assert healthy_pid == surviving_pid
+
+            # 后续并发提交 2 个任务时，存活兄弟保持复用，仅被淘汰槽位按需懒重建全新 PID。
+            follow_up_docs = await asyncio.gather(
+                pool.parse("delay:0.2", b"x"),
+                pool.parse("delay:0.2", b"x"),
+            )
+            follow_up_pids = {_parse_meta(doc)[0] for doc in follow_up_docs}
+            assert len(follow_up_pids) == 2
+            assert surviving_pid in follow_up_pids
+            assert dead_pid not in follow_up_pids
+        finally:
+            await pool.aclose()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.skipif(os.name == "nt", reason="spawn CLI import differs on Windows")
+def test_isolated_parser_pool_single_task_timeout_only_kills_stuck_child() -> None:
+    """单任务超时仅强杀卡死子进程，同池正常在途的兄弟任务必须正常完成。"""
+
+    def _parse_meta(doc: ParsedDocument) -> tuple[int, int]:
+        parts = dict(item.split("=", 1) for item in doc.blocks[0].text.split(";"))
+        return int(parts["pid"]), int(parts["calls"])
+
+    async def scenario() -> None:
+        pool = _IsolatedParserPool(
+            _PidReportingParserFactory(),
+            max_workers=2,
+            timeout_seconds=3,
+        )
+        try:
+            await asyncio.gather(
+                pool.parse("delay:0.2", b"x"),
+                pool.parse("delay:0.2", b"x"),
+            )
+            initial_procs = pool.active_processes()
+            assert len(initial_procs) == 2
+
+            # 先投递卡死慢任务，1.5s 后再投递一个 2.0s 完成的正常兄弟任务，
+            # 确保慢任务在 3.0s 超时强杀时兄弟任务仍在子进程中并发运行。
+            slow_task = asyncio.create_task(pool.parse("slow.txt", b"x"))
+            await asyncio.sleep(1.5)
+            sibling_task = asyncio.create_task(pool.parse("delay:2.0", b"x"))
+
             with pytest.raises(TimeoutError, match="knowledge_parse_timeout"):
                 await slow_task
 
-            assert old_executor not in pool._executors
-            assert all(not proc.is_alive() for proc in old_processes)
+            dead_procs = [proc for proc in initial_procs if not proc.is_alive()]
+            alive_procs = [proc for proc in initial_procs if proc.is_alive()]
+            assert len(dead_procs) == 1
+            assert len(alive_procs) == 1
+            assert pool.active_processes() == (alive_procs[0],)
 
-            # 后续新解析自动懒重建全新进程池并成功返回新 PID。
-            new_pid, calls = _parse_meta(await pool.parse("ok_after_concurrent.txt", b"x"))
-            assert new_pid > 0
-            assert new_pid not in old_pids
-            assert calls == 1
+            sibling_pid, _ = _parse_meta(await sibling_task)
+            assert sibling_pid == alive_procs[0].pid
         finally:
             await pool.aclose()
 

@@ -97,3 +97,70 @@ def test_storage_rejects_invalid_maintenance_page_size(maximum_items: int) -> No
 
     with pytest.raises(ValueError, match="file_maintenance_page_size_invalid"):
         asyncio.run(scenario())
+
+
+class _PrefixClient:
+    """支持 prefix 关键字参数并记录列举参数的 MinIO 测试客户端桩。"""
+
+    def __init__(self, items: tuple[_Item, ...]) -> None:
+        self.items = items
+        self.list_calls: list[tuple[str | None, str | None]] = []
+
+    def list_objects(
+        self,
+        bucket_name: str,
+        *,
+        recursive: bool,
+        prefix: str | None = None,
+        start_after: str | None = None,
+    ) -> object:
+        del bucket_name, recursive
+        self.list_calls.append((prefix, start_after))
+        return iter(
+            item
+            for item in self.items
+            if (prefix is None or item.object_name.startswith(prefix))
+            and (start_after is None or item.object_name > start_after)
+        )
+
+
+def test_storage_iter_maintenance_candidates_filters_by_target_prefix() -> None:
+    """显式传入业务前缀时仅列举该前缀对象，绝不扫描 knowledge/ 前缀。"""
+    items = (
+        _Item("knowledge/" + "a" * 64 + "/ksrc_1/aa/" + "b" * 64, NOW.replace(day=1)),
+        _Item("session-files/aa/old", NOW.replace(day=1)),
+        _Item("session-files/bb/recent", NOW),
+        _Item("skills/cc/00/pkg.zip", NOW.replace(day=1)),
+    )
+    client = _PrefixClient(items)
+
+    async def scenario() -> list[FileObjectScanEntry]:
+        return [
+            entry
+            async for entry in _store(client).iter_maintenance_candidates(  # type: ignore[arg-type]
+                older_than_seconds=86400,
+                maximum_items=10,
+                prefix="session-files/",
+            )
+        ]
+
+    entries = asyncio.run(scenario())
+
+    assert [entry.object_key for entry in entries] == [
+        "session-files/aa/old",
+        "session-files/bb/recent",
+    ]
+    assert [entry.is_candidate for entry in entries] == [True, False]
+    assert client.list_calls == [("session-files/", None)]
+
+
+@pytest.mark.parametrize("bad_prefix", ["", "knowledge/", "unknown/"])
+def test_storage_rejects_invalid_maintenance_prefix(bad_prefix: str) -> None:
+    """非白名单业务前缀必须被拒绝，防止越界扫描 knowledge/ 或空前缀。"""
+
+    async def scenario() -> None:
+        iterator = _store(_Client(())).iter_maintenance_candidates(prefix=bad_prefix)
+        await anext(iterator)
+
+    with pytest.raises(ValueError, match="file_maintenance_prefix_invalid"):
+        asyncio.run(scenario())

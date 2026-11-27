@@ -397,3 +397,20 @@ def test_parameter_schema_external_ref_fails_without_network() -> None:
         validate_parameter_schema(schema, {"value": 1})
 
     assert "example.invalid" not in str(error.value)
+
+
+@pytest.mark.parametrize(
+    "bad_value",
+    [float("nan"), float("inf"), object()],
+)
+def test_parameter_schema_rejects_nan_infinity_and_non_json_serializable(
+    bad_value: object,
+) -> None:
+    """NaN、Infinity 与不可 JSON 序列化值必须在序列化阶段转为 skill_parameter_schema_invalid。"""
+    schema: dict[str, object] = {
+        "type": "object",
+        "properties": {"value": {"default": bad_value}},
+    }
+
+    with pytest.raises(SkillPackageError, match="skill_parameter_schema_invalid"):
+        validate_parameter_schema(schema, {})

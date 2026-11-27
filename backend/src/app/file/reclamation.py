@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
+from typing import cast
 
 from domain.file import FileObjectReferenceRepository, FileObjectStore
 
@@ -21,6 +23,18 @@ class ObjectReclamationResult:
     eligible_count: int
     deleted_count: int
     failed_count: int
+
+
+@dataclass(slots=True)
+class _ReclamationCounters:
+    """扫描过程中维护的聚合统计与待删除队列。"""
+
+    examined: int = 0
+    candidates: int = 0
+    referenced: int = 0
+    eligible: int = 0
+    deleted: int = 0
+    failed: int = 0
 
 
 class FileObjectMaintenance:
@@ -67,12 +81,14 @@ class FileObjectMaintenance:
         *,
         execute: bool = False,
         writers_stopped: bool = False,
+        prefixes: Sequence[str] | None = None,
     ) -> ObjectReclamationResult:
-        """从桶起点扫描全部合法对象，默认只报告预计删除结果。
+        """按可选业务前缀扫描全部合法对象，默认只报告预计删除结果。
 
         参数:
             execute: 为 ``True`` 时删除已确认无数据库引用的候选对象。
             writers_stopped: 操作者对全部写入者已停止的确认；执行删除时必填。
+            prefixes: 可选业务前缀列表；为 ``None`` 时从桶起点无前缀兼容扫描。
 
         返回:
             本次扫描、引用命中、可删除和实际删除数量的汇总。
@@ -84,21 +100,71 @@ class FileObjectMaintenance:
         if execute and not writers_stopped:
             raise ValueError("file_maintenance_writers_must_stop")
 
-        examined = 0
-        candidates = 0
-        referenced = 0
-        eligible = 0
-        deleted = 0
-        failed = 0
-        after_key: str | None = None
+        counters = _ReclamationCounters()
+        pending_candidates: list[str] = []
         pending_deletes: list[str] = []
+        scan_targets: tuple[str | None, ...] = tuple(prefixes) if prefixes is not None else (None,)
 
+        for prefix in scan_targets:
+            await self._scan_prefix(
+                prefix=prefix,
+                execute=execute,
+                counters=counters,
+                pending_candidates=pending_candidates,
+                pending_deletes=pending_deletes,
+            )
+
+        if pending_candidates:
+            await self._process_candidate_batch(
+                pending_candidates,
+                execute=execute,
+                counters=counters,
+                pending_deletes=pending_deletes,
+            )
+            pending_candidates.clear()
+
+        if execute and pending_deletes:
+            counters.deleted, counters.failed = await self._delete_pending(
+                pending_deletes,
+                deleted=counters.deleted,
+                failed=counters.failed,
+            )
+        return ObjectReclamationResult(
+            examined_count=counters.examined,
+            candidate_count=counters.candidates,
+            referenced_count=counters.referenced,
+            eligible_count=counters.eligible,
+            deleted_count=counters.deleted,
+            failed_count=counters.failed,
+        )
+
+    async def _scan_prefix(
+        self,
+        *,
+        prefix: str | None,
+        execute: bool,
+        counters: _ReclamationCounters,
+        pending_candidates: list[str],
+        pending_deletes: list[str],
+    ) -> None:
+        """分页扫描单个前缀（或无前缀全桶），按 delete_batch_size 收集候选键并核验引用。"""
+        after_key: str | None = None
         while True:
             entries = []
-            iterator = self._store.iter_maintenance_candidates(
-                older_than_seconds=self._retention_seconds,
-                after_key=after_key,
-                maximum_items=self._page_size,
+            # 未指定 prefixes 时不传入 prefix 参数，保持对既有测试存储桩的 100% 兼容。
+            iterator = (
+                self._store.iter_maintenance_candidates(
+                    older_than_seconds=self._retention_seconds,
+                    after_key=after_key,
+                    maximum_items=self._page_size,
+                )
+                if prefix is None
+                else self._store.iter_maintenance_candidates(
+                    older_than_seconds=self._retention_seconds,
+                    after_key=after_key,
+                    maximum_items=self._page_size,
+                    prefix=prefix,
+                )
             )
             try:
                 async for entry in iterator:
@@ -111,55 +177,88 @@ class FileObjectMaintenance:
                 break
 
             for entry in entries:
-                examined += 1
+                counters.examined += 1
                 if not entry.is_candidate:
                     continue
-                candidates += 1
-                try:
-                    is_referenced = await self._references.is_object_key_referenced(
-                        entry.object_key
+                counters.candidates += 1
+                pending_candidates.append(entry.object_key)
+                if len(pending_candidates) >= self._delete_batch_size:
+                    await self._process_candidate_batch(
+                        pending_candidates,
+                        execute=execute,
+                        counters=counters,
+                        pending_deletes=pending_deletes,
                     )
+                    pending_candidates.clear()
+
+            after_key = entries[-1].object_key
+            if len(entries) < self._page_size:
+                break
+
+    async def _process_candidate_batch(
+        self,
+        candidate_keys: Sequence[str],
+        *,
+        execute: bool,
+        counters: _ReclamationCounters,
+        pending_deletes: list[str],
+    ) -> None:
+        """优先单次批量核验引用，失败或未实现批量端口时回退逐条核验并隔离单项故障。"""
+        batch_lookup = getattr(self._references, "find_referenced_object_keys", None)
+        referenced_keys: set[str] | None = None
+        if callable(batch_lookup):
+            try:
+                referenced_keys = await cast(
+                    Callable[[Sequence[str]], Awaitable[set[str]]],
+                    batch_lookup,
+                )(list(candidate_keys))
+            except asyncio.CancelledError:
+                raise
+            except Exception as error:
+                # 批量查询异常时告警并回退逐条核验，确保坏键隔离与 failed_count 语义一致。
+                logger.warning(
+                    "file_maintenance_batch_reference_check_failed exception_type=%s",
+                    type(error).__name__,
+                )
+
+        if referenced_keys is not None:
+            for key in candidate_keys:
+                if key in referenced_keys:
+                    counters.referenced += 1
+                    continue
+                counters.eligible += 1
+                if execute:
+                    pending_deletes.append(key)
+        else:
+            for key in candidate_keys:
+                try:
+                    is_referenced = await self._references.is_object_key_referenced(key)
                 except asyncio.CancelledError:
                     raise
                 except Exception as error:
-                    failed += 1
+                    counters.failed += 1
                     logger.warning(
                         "file_maintenance_reference_check_failed exception_type=%s",
                         type(error).__name__,
                     )
                     continue
                 if is_referenced:
-                    referenced += 1
+                    counters.referenced += 1
                     continue
-                eligible += 1
-                if not execute:
-                    continue
-                pending_deletes.append(entry.object_key)
-                if len(pending_deletes) >= self._delete_batch_size:
-                    deleted, failed = await self._delete_pending(
-                        pending_deletes,
-                        deleted=deleted,
-                        failed=failed,
-                    )
+                counters.eligible += 1
+                if execute:
+                    pending_deletes.append(key)
 
-            after_key = entries[-1].object_key
-            if len(entries) < self._page_size:
-                break
-
-        if execute and pending_deletes:
-            deleted, failed = await self._delete_pending(
-                pending_deletes,
-                deleted=deleted,
-                failed=failed,
+        if not execute:
+            return
+        while len(pending_deletes) >= self._delete_batch_size:
+            batch = pending_deletes[: self._delete_batch_size]
+            del pending_deletes[: self._delete_batch_size]
+            counters.deleted, counters.failed = await self._delete_pending(
+                batch,
+                deleted=counters.deleted,
+                failed=counters.failed,
             )
-        return ObjectReclamationResult(
-            examined_count=examined,
-            candidate_count=candidates,
-            referenced_count=referenced,
-            eligible_count=eligible,
-            deleted_count=deleted,
-            failed_count=failed,
-        )
 
     async def _delete_pending(
         self,
@@ -197,6 +296,3 @@ class FileObjectMaintenance:
                 deleted += 1
         object_keys.clear()
         return deleted, failed
-
-
-__all__ = ["FileObjectMaintenance", "ObjectReclamationResult"]

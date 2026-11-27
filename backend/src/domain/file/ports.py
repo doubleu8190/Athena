@@ -153,8 +153,9 @@ class FileObjectStore(Protocol):
         older_than_seconds: int = 86400,
         after_key: str | None = None,
         maximum_items: int = 1000,
+        prefix: str | None = None,
     ) -> AsyncIterator[FileObjectScanEntry]:
-        """从单次命令的分页位置返回对象并标记合法年龄候选。"""
+        """从单次命令的分页位置返回对象并标记合法年龄候选，支持按业务前缀过滤。"""
 
     async def aclose(self) -> None:
         """释放线程池和 HTTP 连接。"""

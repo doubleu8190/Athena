@@ -217,16 +217,29 @@ class MinioFileObjectStore(MinioStoreAdapterBase, FileObjectStore):
         older_than_seconds: int = 86400,
         after_key: str | None = None,
         maximum_items: int = _LIST_PAGE_SIZE,
+        prefix: str | None = None,
     ) -> AsyncIterator[FileObjectScanEntry]:
         """从离线扫描位置按有界页返回对象及其候选判定；已关闭包装层立即拒绝继续拉取。"""
         if older_than_seconds < 86400:
             raise ValueError("file_maintenance_grace_period_invalid")
         if not 1 <= maximum_items <= _LIST_PAGE_SIZE:
             raise ValueError("file_maintenance_page_size_invalid")
+        if prefix is not None and prefix not in FILE_OBJECT_PREFIXES:
+            raise ValueError("file_maintenance_prefix_invalid")
         cutoff, remaining = as_utc(self._clock()).timestamp() - older_than_seconds, maximum_items
         try:
-            stream = self.object_client.iter_objects(
-                start_after=after_key, is_closed=lambda: self._closed
+            # 仅在显式指定非空业务前缀时透传 prefix，保持与无前缀扫描桩的 100% 兼容。
+            stream = (
+                self.object_client.iter_objects(
+                    start_after=after_key,
+                    is_closed=lambda: self._closed,
+                )
+                if prefix is None
+                else self.object_client.iter_objects(
+                    prefix=prefix,
+                    start_after=after_key,
+                    is_closed=lambda: self._closed,
+                )
             )
             async with aclosing(stream) as items:
                 async for item in items:

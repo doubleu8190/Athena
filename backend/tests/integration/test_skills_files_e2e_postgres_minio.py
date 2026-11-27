@@ -165,6 +165,7 @@ class _RecordingStore:
         older_than_seconds: int = 86400,
         after_key: str | None = None,
         maximum_items: int = 1000,
+        prefix: str | None = None,
     ) -> AsyncIterator[FileObjectScanEntry]:
         remaining_items = maximum_items
         next_after_key = after_key
@@ -176,6 +177,7 @@ class _RecordingStore:
                 older_than_seconds=older_than_seconds,
                 after_key=next_after_key,
                 maximum_items=requested_items,
+                prefix=prefix,
             ):
                 examined_items += 1
                 last_object_key = entry.object_key

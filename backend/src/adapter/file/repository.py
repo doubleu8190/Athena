@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from datetime import datetime
 
 from sqlalchemy import func, select
@@ -348,6 +349,14 @@ class SqlAlchemySessionFileRepository(
         async with self._session_factory() as session:
             return await _is_object_key_referenced_in_session(session, object_key)
 
+    async def find_referenced_object_keys(self, object_keys: Sequence[str]) -> set[str]:
+        """在单事务内通过 IN 批量复核四处业务表对候选对象键的引用，消除 N+1 查库。"""
+        unique_keys = tuple(dict.fromkeys(object_keys))
+        if not unique_keys:
+            return set()
+        async with self._session_factory() as session:
+            return await _find_referenced_object_keys_in_session(session, unique_keys)
+
     async def _upload_request(
         self,
         session: AsyncSession,
@@ -426,6 +435,26 @@ async def _is_object_key_referenced_in_session(
             .limit(1)
         )
     )
+
+
+async def _find_referenced_object_keys_in_session(
+    session: AsyncSession,
+    object_keys: Sequence[str],
+) -> set[str]:
+    """在单事务会话内批量检查四张引用列命中的活跃对象键。"""
+    referenced: set[str] = set()
+    reference_columns = (
+        SessionFileModel.object_key,
+        SessionFileModel.extracted_text_key,
+        SkillVersionModel.object_key,
+        SkillExecutionModel.log_object_key,
+    )
+    for column in reference_columns:
+        rows = await session.scalars(select(column).where(column.in_(object_keys)))
+        for key in rows:
+            if isinstance(key, str):
+                referenced.add(key)
+    return referenced
 
 
 __all__ = [

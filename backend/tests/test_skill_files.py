@@ -86,8 +86,9 @@ class _Objects:
         older_than_seconds: int = 86400,
         after_key: str | None = None,
         maximum_items: int = 1000,
+        prefix: str | None = None,
     ) -> AsyncIterator[FileObjectScanEntry]:
-        del older_than_seconds, after_key, maximum_items
+        del older_than_seconds, after_key, maximum_items, prefix
         if False:
             yield FileObjectScanEntry("session-files/00/empty", False)
 

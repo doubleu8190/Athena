@@ -200,7 +200,15 @@ def validate_parameter_schema(schema: dict[str, Any], value: Any) -> str | None:
     """用 Draft 2020-12 验证一次调用参数，根 Schema 保持对象语义。"""
     effective_schema = _checked_parameter_schema(schema)
     try:
-        schema_json = json.dumps(effective_schema, ensure_ascii=False, sort_keys=True)
+        schema_json = json.dumps(
+            effective_schema,
+            ensure_ascii=False,
+            allow_nan=False,
+            sort_keys=True,
+        )
+    except (TypeError, ValueError) as error:
+        raise SkillPackageError("skill_parameter_schema_invalid") from error
+    try:
         validator = compile_draft202012_validator(schema_json, reject_external_ref=False)
         errors = sorted(
             validator.iter_errors(value),

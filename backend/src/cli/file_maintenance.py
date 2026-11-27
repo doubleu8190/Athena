@@ -9,6 +9,7 @@ import os
 from dataclasses import asdict
 
 from adapter.file import MinioFileObjectStore, SqlAlchemySessionFileRepository
+from adapter.file.storage import FILE_OBJECT_PREFIXES
 from app.file import FileObjectMaintenance, ObjectReclamationResult
 from infrastructure.database import Database
 
@@ -53,6 +54,7 @@ async def _maintain(
         return await maintenance.run(
             execute=execute,
             writers_stopped=writers_stopped,
+            prefixes=FILE_OBJECT_PREFIXES,
         )
     finally:
         await store.aclose()

@@ -41,7 +41,12 @@ from adapter.file.storage import (
     MinioFileObjectStore,
     MinioFileStorageConfig,
 )
+from adapter.llm.model import ModelProfileVersionModel
+from adapter.message.model import ConversationMessageModel, ExecutionMessageModel
+from adapter.run.model import RunModel, RunToolCallModel
 from adapter.session.model import SessionModel
+from adapter.skill.model import SkillExecutionModel, SkillModel, SkillVersionModel
+from adapter.system_prompt.model import SystemPromptVersionModel
 from app.file import FileInputError, FileObjectMaintenance, SessionFileService
 from app.run.context import messages_to_llm
 from app.run.safe_stop import SafeStopReporter
@@ -287,8 +292,9 @@ class _MemoryObjectStore:
         older_than_seconds: int = 86400,
         after_key: str | None = None,
         maximum_items: int = 1000,
+        prefix: str | None = None,
     ) -> AsyncIterator[FileObjectScanEntry]:
-        del older_than_seconds, after_key, maximum_items
+        del older_than_seconds, after_key, maximum_items, prefix
         if False:
             yield FileObjectScanEntry("session-files/00/empty", False)
 
@@ -1621,6 +1627,225 @@ def test_sqlalchemy_repository_extraction_and_object_reference_protection() -> N
                 assert fake_minio.removed == [orphan_cache_key]
             finally:
                 await minio_store.aclose()
+
+    asyncio.run(scenario())
+
+
+def test_sqlalchemy_repository_find_referenced_object_keys_covers_all_tables() -> None:
+    """find_referenced_object_keys 须在单次批量查询中覆盖全部 4 处引用列。"""
+
+    async def scenario() -> None:
+        async with pg_unit_db() as (_engine, factory):
+            orig_key = "session-files/aa/file_batch_1"
+            cache_key = "session-files-extracted/aa/file_batch_1.txt"
+            skill_pkg_key = f"skills/aa/{'1' * 64}/ver_1.zip"
+            skill_log_key = f"skill-logs/aa/{'2' * 64}/exec_1.log"
+            orphan_key = "session-files/ff/unreferenced"
+
+            async with factory() as session, session.begin():
+                session.add(
+                    UserModel(
+                        id="usr_batch_1",
+                        email="batch1@example.com",
+                        password_hash="hash",
+                        status=UserStatus.ACTIVE.value,
+                        role=UserRole.MEMBER.value,
+                        created_at=NOW,
+                        updated_at=NOW,
+                    )
+                )
+                session.add(
+                    ModelProfileVersionModel(
+                        id="mpv_batch_1",
+                        name="Batch Test Model",
+                        protocol="chat_completions",
+                        base_url="https://api.example.com/v1",
+                        model="gpt-4o-mini",
+                        api_key_ciphertext=b"cipher",
+                        api_key_nonce=b"123456789012",
+                        api_key_key_version=1,
+                        context_window_tokens=128000,
+                        tokenizer_encoding="cl100k_base",
+                        supports_stream=True,
+                        supports_tools=True,
+                        supports_parallel_tool_calls=False,
+                        max_output_tokens=4096,
+                        request_timeout_seconds=30,
+                        execution_timeout_seconds=120,
+                        max_concurrency=4,
+                        enabled=True,
+                        version=1,
+                        created_at=NOW,
+                        updated_at=NOW,
+                    )
+                )
+                session.add_all(
+                    [
+                        SystemPromptVersionModel(
+                            id="spv_main_batch",
+                            kind="main",
+                            content="main",
+                            created_at=NOW,
+                        ),
+                        SystemPromptVersionModel(
+                            id="spv_comp_batch",
+                            kind="compression",
+                            content="comp",
+                            created_at=NOW,
+                        ),
+                    ]
+                )
+                await session.flush()
+                session.add(
+                    SessionModel(
+                        id="ses_batch_1",
+                        owner_id="usr_batch_1",
+                        title="批量引用核验",
+                        created_at=NOW,
+                        updated_at=NOW,
+                    )
+                )
+                await session.flush()
+                session.add(
+                    ConversationMessageModel(
+                        id="cmsg_batch_1",
+                        session_id="ses_batch_1",
+                        role="user",
+                        status="completed",
+                        sequence=1,
+                        parts=[{"type": "text", "text": "hi"}],
+                        run_id="run_batch_1",
+                        context_turn_id="turn_1",
+                        created_at=NOW,
+                    )
+                )
+                session.add(
+                    RunModel(
+                        id="run_batch_1",
+                        session_id="ses_batch_1",
+                        owner_id="usr_batch_1",
+                        status="running",
+                        trigger_message_id="cmsg_batch_1",
+                        context_cutoff_sequence=0,
+                        model_config_version_id="mpv_batch_1",
+                        model_snapshot_json={"model": "gpt-4o-mini"},
+                        main_prompt_version_id="spv_main_batch",
+                        compression_prompt_version_id="spv_comp_batch",
+                        prompt_template_version="run-v2",
+                        queued_at=NOW,
+                        created_at=NOW,
+                        updated_at=NOW,
+                    )
+                )
+                await session.flush()
+                session.add(
+                    ExecutionMessageModel(
+                        id="emsg_batch_1",
+                        session_id="ses_batch_1",
+                        run_id="run_batch_1",
+                        thread_id="run_batch_1",
+                        sequence=1,
+                        role="assistant",
+                        parts=[{"type": "text", "text": "calling"}],
+                        created_at=NOW,
+                    )
+                )
+                await session.flush()
+                session.add(
+                    RunToolCallModel(
+                        id="rtc_batch_1",
+                        run_id="run_batch_1",
+                        session_id="ses_batch_1",
+                        tool_call_id="tc_batch_1",
+                        ordinal=1,
+                        tool_id="skill_execute",
+                        tool_kind="builtin",
+                        model_name="skill_execute",
+                        execution_epoch=1,
+                        status="completed",
+                        call_message_id="emsg_batch_1",
+                    )
+                )
+                session.add(
+                    SkillModel(
+                        id="skl_batch_1",
+                        slug="batch-skill",
+                        scope="company",
+                        format="package",
+                        created_by="usr_batch_1",
+                        created_at=NOW,
+                        updated_at=NOW,
+                    )
+                )
+                await session.flush()
+                session.add(
+                    SkillVersionModel(
+                        id="sklv_batch_1",
+                        skill_id="skl_batch_1",
+                        ordinal=1,
+                        label="1.0.0",
+                        guide="guide",
+                        manifest={"slug": "batch-skill"},
+                        object_key=skill_pkg_key,
+                        package_sha256="1" * 64,
+                        dependency_requirements=[],
+                        dependency_check={"status": "satisfied", "items": []},
+                        created_by="usr_batch_1",
+                        request_operation="import",
+                        idempotency_key="idem_skl_batch_1",
+                        request_fingerprint="a" * 64,
+                        created_at=NOW,
+                    )
+                )
+                await session.flush()
+                session.add(
+                    SkillExecutionModel(
+                        id="sklex_batch_1",
+                        run_id="run_batch_1",
+                        session_id="ses_batch_1",
+                        tool_call_record_id="rtc_batch_1",
+                        skill_id="skl_batch_1",
+                        skill_version_id="sklv_batch_1",
+                        script_path="scripts/run.py",
+                        input_file_ids=[],
+                        parameters_sha256="2" * 64,
+                        python_version="3.12",
+                        dependency_check={"status": "satisfied", "items": []},
+                        status="succeeded",
+                        log_object_key=skill_log_key,
+                        created_at=NOW,
+                    )
+                )
+
+            repo = SqlAlchemySessionFileRepository(factory)
+            await repo.publish_upload(
+                "ses_batch_1",
+                "usr_batch_1",
+                PendingSessionFile(
+                    id="file_batch_1",
+                    filename="doc.pdf",
+                    label=None,
+                    mime_type="application/pdf",
+                    size_bytes=128,
+                    sha256="ab" * 32,
+                    object_key=orig_key,
+                    output_index=-1,
+                    created_at=NOW,
+                    extraction_status=SessionFileExtractionStatus.READY,
+                    extracted_text_key=cache_key,
+                    extracted_text_bytes=64,
+                    extraction_error_code=None,
+                ),
+                idempotency_key="idem_file_batch_1",
+                request_fingerprint="fp_file_batch_1",
+                published_at=NOW,
+            )
+
+            assert await repo.find_referenced_object_keys(()) == set()
+            found = await repo.find_referenced_object_keys(
+                [orig_key, cache_key, skill_pkg_key, skill_log_key, orphan_key, orig_key]
+            )
+            assert found == {orig_key, cache_key, skill_pkg_key, skill_log_key}
 
     asyncio.run(scenario())
 

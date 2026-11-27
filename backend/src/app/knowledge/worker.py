@@ -3,17 +3,17 @@
 from __future__ import annotations
 
 import asyncio
-import atexit
 import logging
 import math
 import multiprocessing
+import threading
 import time
 import weakref
 from collections.abc import AsyncGenerator, Callable
-from concurrent.futures import ProcessPoolExecutor
-from concurrent.futures.process import BrokenProcessPool
 from contextlib import aclosing
 from dataclasses import asdict
+from multiprocessing.connection import Connection
+from multiprocessing.process import BaseProcess
 from typing import cast
 
 from domain.knowledge.model import (
@@ -97,7 +97,7 @@ class KnowledgeWorker:
         self._monotonic = monotonic
         self._sweep_counter = 0
         self._last_orphan_sweep_at: float | None = None
-        # 隔离模式下基于标准库 ProcessPoolExecutor 复用 spawn 子进程，避免重复 OCR 冷启动。
+        # 隔离模式下基于 spawn + 双工 Pipe 复用受控解析子进程，避免重复 OCR 冷启动与私有属性探测。
         self._parser_pool: _IsolatedParserPool | None = (
             _IsolatedParserPool(
                 parser_factory,
@@ -559,94 +559,121 @@ def _close_child_loop() -> None:
         loop.close()
 
 
-def _init_parser_child(factory: DocumentParserFactory) -> None:
-    """在 spawn 子进程启动时创建并缓存 DocumentParser 实例，消除重复 OCR 冷启动。"""
+def _parser_worker_entry(factory: DocumentParserFactory, conn: Connection) -> None:
+    """spawn 解析子进程主循环：初始化一次解析器并按双工 Pipe 逐条处理请求。"""
     global _CHILD_PARSER, _CHILD_LOOP
-    _CHILD_PARSER = factory.create()
-    _CHILD_LOOP = None
-    atexit.register(_close_child_loop)
+    try:
+        _CHILD_PARSER = factory.create()
+        _CHILD_LOOP = None
+        while True:
+            try:
+                payload = conn.recv()
+            except EOFError:
+                break
+            if payload is None:
+                break
+            filename, content = cast(tuple[str, bytes], payload)
+            try:
+                # 若解析器实现提供 parse_sync，直接同步执行以省去子进程内额外事件循环开销。
+                parse_sync = getattr(_CHILD_PARSER, "parse_sync", None)
+                if callable(parse_sync):
+                    parsed = cast(ParsedDocument, parse_sync(filename, content))
+                else:
+                    if _CHILD_LOOP is None or _CHILD_LOOP.is_closed():
+                        _CHILD_LOOP = asyncio.new_event_loop()
+                        asyncio.set_event_loop(_CHILD_LOOP)
+                    parsed = _CHILD_LOOP.run_until_complete(_CHILD_PARSER.parse(filename, content))
+            except BaseException as error:
+                if isinstance(error, (KeyboardInterrupt, SystemExit)):
+                    raise
+                category, should_recycle = _classify_parser_error(error)
+                response: tuple[bool, ParsedDocument | str, bool] = (
+                    False,
+                    category,
+                    should_recycle,
+                )
+            else:
+                response = (True, parsed, False)
+            try:
+                conn.send(response)
+            except (BrokenPipeError, EOFError, OSError):
+                break
+    finally:
+        _CHILD_PARSER = None
+        _close_child_loop()
+        try:
+            conn.close()
+        except Exception:
+            pass
 
 
-def _run_parser_child_task(
+class _ParserWorkerProcess:
+    """受控解析子进程槽位：封装独立 spawn 进程、双工 Pipe 与幂等回收逻辑。"""
+
+    def __init__(self, process: BaseProcess, conn: Connection) -> None:
+        self.process = process
+        self.conn = conn
+        self.tasks_completed = 0
+        self._closed = False
+        self._close_lock = threading.Lock()
+
+    def is_alive(self) -> bool:
+        """判断子进程是否尚未关闭且仍存活。"""
+        return not self._closed and self.process.is_alive()
+
+    def close_sync(self, *, force_kill: bool) -> None:
+        """线程安全、幂等地关闭当前单个子进程并释放 Pipe 句柄。"""
+        with self._close_lock:
+            if self._closed:
+                return
+            self._closed = True
+            if not force_kill:
+                try:
+                    # 投递哨兵 None 通知子进程优雅退出事件循环。
+                    self.conn.send(None)
+                except (BrokenPipeError, EOFError, OSError):
+                    pass
+                try:
+                    self.process.join(timeout=1.0)
+                except Exception:
+                    pass
+            try:
+                if self.process.is_alive():
+                    self.process.terminate()
+                    self.process.join(timeout=1.0)
+                if self.process.is_alive():
+                    self.process.kill()
+                    self.process.join(timeout=1.0)
+                else:
+                    # 已退出进程短 join 收割退出码，避免僵尸进程残留。
+                    self.process.join(timeout=0.1)
+            except Exception:
+                pass
+            try:
+                self.conn.close()
+            except Exception:
+                pass
+
+
+def _exchange_task(
+    worker: _ParserWorkerProcess,
     filename: str,
     content: bytes,
 ) -> tuple[bool, ParsedDocument | str, bool]:
-    """在隔离解析子进程内执行单次文档解析，并将异常脱敏映射为安全错误码。"""
-    global _CHILD_LOOP
-    parser = _CHILD_PARSER
-    if parser is None:
-        return False, "transient:knowledge_parser_process_failed", True
-    try:
-        # 若解析器实现提供 parse_sync，直接同步执行以省去子进程内额外事件循环开销。
-        parse_sync = getattr(parser, "parse_sync", None)
-        if callable(parse_sync):
-            parsed = cast(ParsedDocument, parse_sync(filename, content))
-        else:
-            if _CHILD_LOOP is None or _CHILD_LOOP.is_closed():
-                _CHILD_LOOP = asyncio.new_event_loop()
-                asyncio.set_event_loop(_CHILD_LOOP)
-            parsed = _CHILD_LOOP.run_until_complete(parser.parse(filename, content))
-    except BaseException as error:
-        if isinstance(error, (KeyboardInterrupt, SystemExit)):
-            raise
-        category, should_recycle = _classify_parser_error(error)
-        return False, category, should_recycle
-    return True, parsed, False
+    """在工作线程内通过双工 Pipe 向单个子进程发送文档并等待解析结果。"""
+    worker.conn.send((filename, content))
+    return cast(tuple[bool, ParsedDocument | str, bool], worker.conn.recv())
 
 
-def _shutdown_executor_sync(executor: ProcessPoolExecutor, *, force_kill: bool) -> None:
-    """关闭单个 ProcessPoolExecutor；强杀模式下先快照进程、管理线程与结果队列再彻底回收。"""
-    # 必须在 shutdown 清空内部引用前快照子进程、管理线程与结果队列。
-    processes = list((getattr(executor, "_processes", None) or {}).values())
-    manager_thread = getattr(executor, "_executor_manager_thread", None)
-    result_queue = getattr(executor, "_result_queue", None)
-    if not force_kill:
-        try:
-            executor.shutdown(wait=True, cancel_futures=True)
-            return
-        except Exception:
-            pass
-    # 先标记 shutdown 并取消排队任务，防止终止卡死子进程时 manager 线程重复拉起新进程。
-    try:
-        executor.shutdown(wait=False, cancel_futures=True)
-    except Exception:
-        pass
-    for process in processes:
-        try:
-            if process.is_alive():
-                process.terminate()
-        except Exception:
-            pass
-    for process in processes:
-        try:
-            process.join(timeout=1.0)
-            if process.is_alive():
-                process.kill()
-                process.join(timeout=1.0)
-        except Exception:
-            pass
-    # 等待 manager 线程收敛并关闭结果队列，杜绝 FD 泄漏与后台线程遗留。
-    if manager_thread is not None:
-        try:
-            manager_thread.join(timeout=2.0)
-        except Exception:
-            pass
-    if result_queue is not None:
-        try:
-            result_queue.close()
-        except Exception:
-            pass
-
-
-def _cleanup_executors_sync(executors: set[ProcessPoolExecutor]) -> None:
-    """weakref.finalize 回调：无父对象强引用，回收全部残留解析子进程池。"""
-    for executor in list(executors):
-        executors.discard(executor)
-        _shutdown_executor_sync(executor, force_kill=True)
+def _cleanup_workers_sync(workers: set[_ParserWorkerProcess]) -> None:
+    """weakref.finalize 回调：无父对象强引用，强杀回收全部残留解析子进程。"""
+    for worker in list(workers):
+        workers.discard(worker)
+        worker.close_sync(force_kill=True)
 
 
 class _IsolatedParserPool:
-    """基于标准库 ProcessPoolExecutor 的隔离解析子进程池（支持超时强杀与崩溃懒重建）。"""
+    """基于 spawn + 双工 Pipe 的隔离解析子进程池（支持单进程超时强杀与不误杀兄弟轮换）。"""
 
     def __init__(
         self,
@@ -664,91 +691,98 @@ class _IsolatedParserPool:
         self._max_workers = max_workers
         self._timeout_seconds = timeout_seconds
         self._max_tasks_per_child = max_tasks_per_child
-        self._current: ProcessPoolExecutor | None = None
-        self._executors: set[ProcessPoolExecutor] = set()
-        self._inflight: dict[ProcessPoolExecutor, int] = {}
+        self._semaphore = asyncio.Semaphore(max_workers)
+        self._idle: list[_ParserWorkerProcess] = []
+        self._workers: set[_ParserWorkerProcess] = set()
         self._closed = False
-        # 仅捕获 _executors 集合，不持有 self 强引用，保证测试未调用 aclose() 退出时不挂起。
-        self._finalizer = weakref.finalize(self, _cleanup_executors_sync, self._executors)
+        # 仅捕获 _workers 集合，不持有 self 强引用，保证测试未调用 aclose() 退出时不挂起。
+        self._finalizer = weakref.finalize(self, _cleanup_workers_sync, self._workers)
 
-    def _get_or_create_executor(self) -> ProcessPoolExecutor:
+    def active_processes(self) -> tuple[BaseProcess, ...]:
+        """只读返回当前进程池持有的存活子进程句柄。"""
+        return tuple(worker.process for worker in self._workers if worker.is_alive())
+
+    def _acquire_or_spawn_worker(self) -> _ParserWorkerProcess:
+        """优先复用存活空闲子进程，无可用空闲进程时按 spawn 方式懒拉起新子进程。"""
         if self._closed:
             raise RuntimeError("knowledge_parser_pool_closed")
-        if self._current is None:
-            executor = ProcessPoolExecutor(
-                max_workers=self._max_workers,
-                mp_context=multiprocessing.get_context("spawn"),
-                initializer=_init_parser_child,
-                initargs=(self._factory,),
-                max_tasks_per_child=self._max_tasks_per_child,
-            )
-            self._current = executor
-            self._executors.add(executor)
-        return self._current
+        while self._idle:
+            candidate = self._idle.pop()
+            if candidate.is_alive():
+                return candidate
+            # 已意外退出的空闲子进程立即淘汰并关闭 Pipe，不留死句柄。
+            self._workers.discard(candidate)
+            candidate.close_sync(force_kill=True)
+        ctx = multiprocessing.get_context("spawn")
+        parent_conn, child_conn = ctx.Pipe(duplex=True)
+        process = ctx.Process(
+            target=_parser_worker_entry,
+            args=(self._factory, child_conn),
+            daemon=True,
+        )
+        try:
+            process.start()
+        except BaseException:
+            parent_conn.close()
+            child_conn.close()
+            raise
+        # 父进程立即关闭子端 Pipe 句柄，确保子进程崩溃时 parent_conn.recv() 立即收到 EOFError。
+        child_conn.close()
+        worker = _ParserWorkerProcess(process, parent_conn)
+        self._workers.add(worker)
+        return worker
 
-    async def _discard_executor(self, executor: ProcessPoolExecutor, *, force_kill: bool) -> None:
-        """淘汰旧子进程池：超时/崩溃立即强杀；脏状态轮换仅退位，待无在途任务时再关闭。"""
-        if self._current is executor:
-            self._current = None
-        # 幂等守卫：已被其他分支移除的旧池直接返回，避免重复触发 shutdown。
-        if executor not in self._executors:
-            return
-        if force_kill:
-            self._executors.discard(executor)
-            self._inflight.pop(executor, None)
-            await asyncio.to_thread(_shutdown_executor_sync, executor, force_kill=True)
-            return
-        if self._inflight.get(executor, 0) <= 0:
-            self._executors.discard(executor)
-            self._inflight.pop(executor, None)
-            await asyncio.to_thread(_shutdown_executor_sync, executor, force_kill=False)
-        # 同池仍有兄弟任务在途时仅靠置空 self._current 阻止新任务进入，
-        # 严禁提前调用 shutdown(wait=False) 清空 _processes，以免兄弟任务超时后无法强杀；
-        # 留待兄弟超时走 force_kill 或最后一个在途任务离开 finally 时执行唯一一次关闭。
+    async def _retire_worker(self, worker: _ParserWorkerProcess, *, force_kill: bool) -> None:
+        """仅淘汰并关闭指定子进程，绝不波及同池其他正常在途的兄弟子进程。"""
+        self._workers.discard(worker)
+        try:
+            await asyncio.shield(asyncio.to_thread(worker.close_sync, force_kill=force_kill))
+        except BaseException:
+            worker.close_sync(force_kill=True)
+            raise
 
     async def parse(self, filename: str, content: bytes) -> ParsedDocument:
-        """在独立 spawn 子进程中执行解析，覆盖超时强杀、崩溃自愈与脏状态轮换。"""
-        executor = self._get_or_create_executor()
-        self._inflight[executor] = self._inflight.get(executor, 0) + 1
-        loop = asyncio.get_running_loop()
-        force_discard = False
-        future: asyncio.Future[tuple[bool, ParsedDocument | str, bool]] | None = None
+        """在独立 spawn 子进程中执行解析，覆盖单进程超时强杀、崩溃自愈与单槽位轮换。"""
+        if self._closed:
+            raise RuntimeError("knowledge_parser_pool_closed")
+        await self._semaphore.acquire()
+        worker: _ParserWorkerProcess | None = None
+        force_kill = False
+        should_recycle = False
+        succeeded = False
+        result: ParsedDocument | str = ""
         try:
-            future = loop.run_in_executor(executor, _run_parser_child_task, filename, content)
-            succeeded, result, should_recycle = await asyncio.wait_for(
-                future,
-                timeout=self._timeout_seconds,
-            )
-        except TimeoutError:
-            force_discard = True
-            raise TimeoutError("knowledge_parse_timeout") from None
-        except BrokenProcessPool:
-            force_discard = True
-            raise RuntimeError("knowledge_parser_process_failed") from None
-        except asyncio.CancelledError:
-            if future is None or not future.done():
-                force_discard = True
-            raise
+            if self._closed:
+                raise RuntimeError("knowledge_parser_pool_closed")
+            worker = self._acquire_or_spawn_worker()
+            try:
+                succeeded, result, child_recycle = await asyncio.wait_for(
+                    asyncio.to_thread(_exchange_task, worker, filename, content),
+                    timeout=self._timeout_seconds,
+                )
+                should_recycle = child_recycle
+            except TimeoutError:
+                force_kill = True
+                raise TimeoutError("knowledge_parse_timeout") from None
+            except (EOFError, BrokenPipeError, OSError):
+                force_kill = True
+                raise RuntimeError("knowledge_parser_process_failed") from None
+            except asyncio.CancelledError:
+                force_kill = True
+                raise
         finally:
-            remaining = self._inflight.get(executor, 1) - 1
-            if remaining <= 0:
-                self._inflight.pop(executor, None)
-            else:
-                self._inflight[executor] = remaining
-            if force_discard:
-                try:
-                    await asyncio.shield(self._discard_executor(executor, force_kill=True))
-                except BaseException:
-                    self._executors.discard(executor)
-                    if self._current is executor:
-                        self._current = None
-                    _shutdown_executor_sync(executor, force_kill=True)
-            elif executor is not self._current and remaining <= 0 and executor in self._executors:
-                # 退位旧池的最后一个在途任务离开后，主动收尾回收该旧池。
-                await asyncio.shield(self._discard_executor(executor, force_kill=False))
+            try:
+                if worker is not None:
+                    worker.tasks_completed += 1
+                    if force_kill or self._closed or not worker.is_alive():
+                        await self._retire_worker(worker, force_kill=True)
+                    elif should_recycle or worker.tasks_completed >= self._max_tasks_per_child:
+                        await self._retire_worker(worker, force_kill=False)
+                    else:
+                        self._idle.append(worker)
+            finally:
+                self._semaphore.release()
 
-        if should_recycle:
-            await self._discard_executor(executor, force_kill=False)
         if not succeeded:
             raise _decode_child_error(str(result))
         if not isinstance(result, ParsedDocument):
@@ -756,17 +790,14 @@ class _IsolatedParserPool:
         return result
 
     async def aclose(self) -> None:
-        """优雅关闭并回收全部解析子进程池；可安全重复调用。"""
-        if self._closed and not self._executors:
+        """幂等、抗取消地关闭全部解析子进程并解绑 finalizer。"""
+        if self._closed and not self._workers:
             return
         self._closed = True
-        self._current = None
-        self._inflight.clear()
-        # 逐个关闭后再从 _executors 移除，防止中途取消导致剩余池脱离 weakref.finalize 兜底。
-        for executor in list(self._executors):
-            await asyncio.shield(
-                asyncio.to_thread(_shutdown_executor_sync, executor, force_kill=False)
-            )
-            self._executors.discard(executor)
-        if not self._executors:
+        self._idle.clear()
+        # 逐个关闭后再移出 _workers，防止中途取消导致剩余进程脱离 weakref.finalize 兜底。
+        for worker in list(self._workers):
+            await asyncio.shield(asyncio.to_thread(worker.close_sync, force_kill=False))
+            self._workers.discard(worker)
+        if not self._workers:
             self._finalizer.detach()

@@ -13,9 +13,9 @@ from sqlalchemy import func, select, text, update
 from sqlalchemy.exc import IntegrityError
 
 from adapter.auth.model import AuthSessionModel, UserModel
-from adapter.llm.model.profile import CompressionPolicyVersionModel, ModelProfileVersionModel
+from adapter.llm.model import CompressionPolicyVersionModel, ModelProfileVersionModel
 from adapter.llm.repository import SqlAlchemyModelProfileRepository
-from adapter.message.repository.message import SqlAlchemyMessageRepository
+from adapter.message.repository import SqlAlchemyMessageRepository
 from adapter.run.repository import SqlAlchemyRunRepository
 from app.llm.profile_service import ModelProfileService
 from domain.auth import AuthContext, User, UserRole, UserStatus

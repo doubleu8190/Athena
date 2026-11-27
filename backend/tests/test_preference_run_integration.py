@@ -23,10 +23,9 @@ from system_prompt_support import (
 )
 
 from adapter.auth.model import AuthSessionModel, UserModel
-from adapter.llm.model import ModelProfileVersionModel
-from adapter.llm.model.profile import DefaultModelProfileModel
+from adapter.llm.model import DefaultModelProfileModel, ModelProfileVersionModel
 from adapter.llm.repository import SqlAlchemyModelProfileRepository
-from adapter.message.repository.message import SqlAlchemyMessageRepository
+from adapter.message.repository import SqlAlchemyMessageRepository
 from adapter.preference import SqlAlchemyPreferenceRepository
 from adapter.run.repository.run import SqlAlchemyRunRepository
 from adapter.session.model import SessionModel

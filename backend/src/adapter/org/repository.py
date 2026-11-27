@@ -9,8 +9,8 @@ from email_validator import EmailNotValidError, validate_email
 from sqlalchemy import delete, exists, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from adapter.auth.converter.auth import user_to_domain
-from adapter.auth.model.auth import AuthSessionModel, UserModel
+from adapter.auth.converter import user_to_domain
+from adapter.auth.model import AuthSessionModel, UserModel
 from adapter.auth.repository.transaction_guard import verify_active_session_user
 from adapter.org.converter import department_to_domain
 from adapter.org.model import DepartmentModel, DeptAdminScopeModel, UserDepartmentModel

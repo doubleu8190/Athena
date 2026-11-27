@@ -9,8 +9,8 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from adapter.project.model import ProjectModel
 from adapter.run.model import RunModel
-from adapter.session.converter.session import session_to_domain
-from adapter.session.model.session import SessionModel
+from adapter.session.converter import session_to_domain
+from adapter.session.model import SessionModel
 from common.date import as_utc
 from domain.project import ProjectNotFoundError
 from domain.run import RunStatus, SessionHasActiveRunError

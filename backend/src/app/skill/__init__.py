@@ -7,12 +7,15 @@ from app.skill.package import (
     validate_parameter_schema,
 )
 from app.skill.package_cache import SkillPackageCache
+from app.skill.results import SkillAdminDetails, SkillResourceSlice
 from app.skill.service import SkillService
 
 __all__ = [
     "DependencyChecker",
+    "SkillAdminDetails",
     "SkillPackageCache",
     "SkillPackageValidator",
+    "SkillResourceSlice",
     "SkillService",
     "ValidatedSkillPackage",
     "validate_parameter_schema",

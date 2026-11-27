@@ -1,18 +1,18 @@
-"""将会话应用结果转换为 HTTP DTO。"""
+"""将会话领域模型转换为 HTTP DTO。"""
 
 from __future__ import annotations
 
 from api.dto.session import SessionListResponse, SessionResponse
-from app.session.model.result import SessionPageResult, SessionResult
+from domain.session import Session, SessionPage
 
 
-def session_to_response(session: SessionResult) -> SessionResponse:
-    """转换单个会话响应。"""
+def session_to_response(session: Session) -> SessionResponse:
+    """按 DTO 字段白名单投影单个会话响应，自动屏蔽 owner_id 与 deleted_time 等内部属性。"""
     return SessionResponse.model_validate(session)
 
 
 def session_list_to_response(
-    page: SessionPageResult,
+    page: SessionPage,
     *,
     page_number: int,
     page_size: int,

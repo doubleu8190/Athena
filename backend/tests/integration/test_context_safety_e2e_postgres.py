@@ -26,7 +26,7 @@ from sqlalchemy.ext.asyncio import (
 
 from adapter.auth.model import UserModel
 from adapter.auth.repository import SqlAlchemyAuthRepository
-from adapter.llm.model.profile import DefaultModelProfileModel, ModelProfileVersionModel
+from adapter.llm.model import DefaultModelProfileModel, ModelProfileVersionModel
 from adapter.llm.repository import SqlAlchemyModelProfileRepository
 from adapter.message.model import ConversationMessageModel
 from adapter.message.repository import SqlAlchemyMessageRepository

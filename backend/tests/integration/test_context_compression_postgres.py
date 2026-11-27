@@ -14,7 +14,7 @@ from sqlalchemy import select, text
 from sqlalchemy.exc import IntegrityError
 
 from adapter.auth.model import UserModel
-from adapter.llm.model.profile import (
+from adapter.llm.model import (
     CompressionPolicyVersionModel,
     CurrentCompressionPolicyModel,
     DefaultModelProfileModel,

@@ -27,7 +27,7 @@ from adapter.file.model import SessionFileModel
 from adapter.file.repository import SqlAlchemySessionFileRepository
 from adapter.knowledge.model import KnowledgeBaseModel
 from adapter.knowledge.repository import KnowledgeRepository
-from adapter.llm.model.profile import DefaultModelProfileModel, ModelProfileVersionModel
+from adapter.llm.model import DefaultModelProfileModel, ModelProfileVersionModel
 from adapter.message.converter import conversation_to_domain, execution_to_domain
 from adapter.message.model import ConversationMessageModel, ExecutionMessageModel
 from adapter.message.repository import SqlAlchemyMessageRepository

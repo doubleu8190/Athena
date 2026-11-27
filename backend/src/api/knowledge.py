@@ -62,7 +62,10 @@ class _KnowledgeErrorRoute(DomainErrorRoute):
             try:
                 return await original_handler(request)
             except LookupError as error:
-                raise HTTPException(status_code=404, detail=str(error)) from error
+                # 仅映射精确裸 LookupError，避免将 KeyError / IndexError 等子类误吞为 404。
+                if type(error) is LookupError:
+                    raise HTTPException(status_code=404, detail=str(error)) from error
+                raise
             except ValueError as error:
                 # 复用统一的 KnowledgeInputError 状态码分流（409/415/413/429/422）。
                 mapped = domain_error_to_http(KnowledgeInputError(str(error)))

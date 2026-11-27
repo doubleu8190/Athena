@@ -16,8 +16,8 @@ from api.dto.skill import (
     SkillVersionListResponse,
     SkillVersionResponse,
 )
-from app.skill.model import SkillAdminDetails
 from app.skill.personal import PersonalSkillDraft
+from app.skill.results import SkillAdminDetails
 from domain.skill import (
     DependencyCheck,
     Skill,

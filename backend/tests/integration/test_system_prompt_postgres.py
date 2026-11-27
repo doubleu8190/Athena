@@ -23,7 +23,7 @@ from sqlalchemy.ext.asyncio import (
 )
 
 from adapter.auth.model import AuthSessionModel, UserModel
-from adapter.llm.model.profile import (
+from adapter.llm.model import (
     CompressionPolicyVersionModel,
     CurrentCompressionPolicyModel,
     DefaultModelProfileModel,
@@ -635,7 +635,7 @@ def test_system_prompt_repository_cas_restore_rollback_and_run_bindings(
 
             prompt_repository_module = cast(
                 Any,
-                importlib.import_module("adapter.system_prompt.repository.system_prompt"),
+                importlib.import_module("adapter.system_prompt.repository"),
             )
 
             original_new_id = prompt_repository_module.new_id

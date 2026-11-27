@@ -45,7 +45,7 @@ from adapter.knowledge.model import (
 from adapter.knowledge.repository import KnowledgeRepository
 from adapter.llm.repository import SqlAlchemyModelProfileRepository
 from adapter.mcp.repository import SqlAlchemyMcpRepository
-from adapter.message.repository.message import SqlAlchemyMessageRepository
+from adapter.message.repository import SqlAlchemyMessageRepository
 from adapter.org import DepartmentModel, SqlAlchemyOrgRepository, UserDepartmentModel
 from adapter.preference import SqlAlchemyPreferenceRepository
 from adapter.project.repository import SqlAlchemyProjectRepository

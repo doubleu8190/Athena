@@ -19,7 +19,7 @@ from sqlalchemy import select
 
 from adapter.auth.model import AuthSessionModel, UserModel
 from adapter.auth.repository import SqlAlchemyAuthRepository
-from adapter.llm.model.profile import (
+from adapter.llm.model import (
     CompressionPolicyVersionModel,
     CurrentCompressionPolicyModel,
     DefaultModelProfileModel,

@@ -8,6 +8,7 @@ from fastapi.testclient import TestClient
 from pydantic import BaseModel
 
 from api.errors import DomainErrorRoute, domain_error_to_http
+from api.knowledge import _KnowledgeErrorRoute
 from api.mcp_errors import SafeMcpRoute, mcp_error_to_http
 from api.upload import UploadTooLargeError
 from app.file import FileInputError
@@ -403,3 +404,33 @@ def test_safe_mcp_route_masks_validation_errors_and_reuses_domain_mapping() -> N
     assert mcp_error_to_http(ValueError("bad")).detail == "mcp_request_invalid"
     with pytest.raises(RuntimeError, match="unhandled"):
         mcp_error_to_http(RuntimeError("unhandled"))
+
+
+def test_knowledge_error_route_maps_exact_lookup_error_but_not_key_or_index_error() -> None:
+    """_KnowledgeErrorRoute 仅映射精确裸 LookupError 为 404，不吞掉 KeyError / IndexError。"""
+    router = APIRouter(route_class=_KnowledgeErrorRoute)
+
+    @router.get("/bare-lookup")
+    async def bare_lookup() -> None:
+        raise LookupError("knowledge_base_not_found")
+
+    @router.get("/key-error")
+    async def key_error() -> None:
+        raise KeyError("missing_internal_key")
+
+    @router.get("/index-error")
+    async def index_error() -> None:
+        raise IndexError("list index out of range")
+
+    app = FastAPI()
+    app.include_router(router)
+    with TestClient(app, raise_server_exceptions=False) as client:
+        lookup_resp = client.get("/bare-lookup")
+        assert lookup_resp.status_code == 404
+        assert lookup_resp.json() == {"detail": "knowledge_base_not_found"}
+
+        key_resp = client.get("/key-error")
+        assert key_resp.status_code == 500
+
+        index_resp = client.get("/index-error")
+        assert index_resp.status_code == 500

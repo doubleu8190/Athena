@@ -8,12 +8,15 @@ from datetime import UTC, datetime
 import pytest
 from pydantic import ValidationError
 
+from api.converter.auth import user_to_response
 from api.converter.file import session_file_to_response
 from api.converter.knowledge import knowledge_version_to_response
 from api.converter.llm import model_profile_to_response
 from api.converter.mcp import mcp_server_to_response
 from api.converter.message import conversation_message_to_response
+from api.converter.project import project_to_response
 from api.converter.run import run_to_response, tool_call_to_response
+from api.converter.session import session_to_response
 from api.converter.skill import dependency_check_to_response, execution_to_response
 from api.dto.file import SessionFileResponse
 from api.dto.knowledge import KnowledgeImportResponse
@@ -26,19 +29,22 @@ from api.dto.mcp import (
 )
 from api.dto.message import ConversationMessageResponse
 from api.dto.skill import SkillDependencyCheckResponse
-from app.message import ConversationMessageResult
 from domain.access import VisibilityScope
+from domain.auth import AuthProvider, User, UserRole, UserStatus
 from domain.file import SessionFile, SessionFileExtractionStatus, SessionFileSource
 from domain.knowledge.model import DocumentState, DocumentVersion
 from domain.llm.model.profile import ModelProfileVersion
 from domain.mcp import McpSecretMetadata, McpServer, StdioConfig, StreamableHttpConfig
 from domain.message import (
+    ConversationMessage,
     ConversationRole,
+    MessageMetadata,
     MessageStatus,
     TextPart,
     ToolResultPart,
     ToolResultStatus,
 )
+from domain.project import Project
 from domain.run.model import (
     InputRequestStatus,
     PendingSubagentApproval,
@@ -51,6 +57,7 @@ from domain.run.model import (
     RunUsage,
     SubagentTaskSummary,
 )
+from domain.session import Session
 from domain.skill import (
     DependencyCheck,
     DependencyCheckStatus,
@@ -420,7 +427,7 @@ def test_tightened_enum_converters_serialize_to_plain_json_strings() -> None:
     assert call_json["outcome"]["status"] == "ok"
 
     message_dto = conversation_message_to_response(
-        ConversationMessageResult(
+        ConversationMessage(
             id="msg_2",
             session_id="sess_1",
             role=ConversationRole.ASSISTANT,
@@ -436,14 +443,79 @@ def test_tightened_enum_converters_serialize_to_plain_json_strings() -> None:
             ),
             reply_to_message_id="msg_1",
             run_id="run_1",
+            client_message_id="cli_1",
             created_at=NOW,
             completed_at=NOW,
+            metadata=MessageMetadata(model="secret-internal-model"),
+            context_turn_id="turn_1",
         )
     )
     message_json = json.loads(message_dto.model_dump_json())
     assert message_json["role"] == "assistant"
     assert message_json["status"] == "completed"
     assert message_json["parts"][1]["status"] == "success"
+    # 验证直接接收领域对象后，内部元数据与会话轮次标识仍被 DTO 白名单严格屏蔽。
+    assert "metadata" not in message_json
+    assert "client_message_id" not in message_json
+    assert "context_turn_id" not in message_json
+
+    # 同样验证 auth / project / session 直接投影领域实体时不会泄露敏感或软删除内部字段。
+    user_json = json.loads(
+        user_to_response(
+            User(
+                id="usr_1",
+                email="alice@example.com",
+                password_hash="argon2id$secret",
+                display_name="Alice",
+                status=UserStatus.ACTIVE,
+                role=UserRole.MEMBER,
+                auth_provider=AuthProvider.LOCAL,
+                external_union_id="u_ext",
+                external_open_id="o_ext",
+                created_at=NOW,
+                updated_at=NOW,
+                deleted_time=NOW,
+            )
+        ).model_dump_json()
+    )
+    assert "password_hash" not in user_json
+    assert "status" not in user_json
+    assert "deleted_time" not in user_json
+    assert "external_union_id" not in user_json
+    assert "external_open_id" not in user_json
+
+    project_json = json.loads(
+        project_to_response(
+            Project(
+                id="proj_1",
+                owner_id="usr_1",
+                name="Alpha",
+                created_at=NOW,
+                updated_at=NOW,
+                deleted_time=NOW,
+            )
+        ).model_dump_json()
+    )
+    assert "owner_id" not in project_json
+    assert "deleted_time" not in project_json
+
+    session_json = json.loads(
+        session_to_response(
+            Session(
+                id="sess_1",
+                owner_id="usr_1",
+                title="Chat",
+                project_id="proj_1",
+                last_message_sequence=3,
+                created_at=NOW,
+                updated_at=NOW,
+                deleted_time=NOW,
+            )
+        ).model_dump_json()
+    )
+    assert "owner_id" not in session_json
+    assert "last_message_sequence" not in session_json
+    assert "deleted_time" not in session_json
 
 
 def test_tightened_response_dtos_reject_unknown_enum_values() -> None:

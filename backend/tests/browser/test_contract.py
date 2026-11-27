@@ -17,7 +17,7 @@ from typing import cast
 import httpx
 import pytest
 
-from adapter.llm.model.profile import ModelProfileVersionModel
+from adapter.llm.model import ModelProfileVersionModel
 from app.skill.package import SkillPackageValidator
 from browser.contract import read_state_manifest, write_state_manifest
 from browser.harness import (

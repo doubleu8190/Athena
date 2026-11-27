@@ -14,8 +14,8 @@ from adapter.file.storage import FileStorageError
 from api.auth_middleware import AuthPrecheckMiddleware
 from api.security import get_current_auth
 from api.skill import build_skill_personal_router, build_skill_user_router
-from app.skill.model import SkillAdminDetails
 from app.skill.personal import PersonalSkillDraft, PersonalSkillError
+from app.skill.results import SkillAdminDetails
 from domain.auth import AuthContext, User, UserRole, UserStatus
 from domain.skill import (
     DependencyCheck,

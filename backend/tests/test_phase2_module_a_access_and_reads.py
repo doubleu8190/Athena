@@ -25,12 +25,12 @@ from adapter.auth.model import AuthSessionModel, UserModel
 from adapter.auth.repository import SqlAlchemyAuthRepository
 from adapter.knowledge.model import KnowledgeBaseModel
 from adapter.knowledge.repository import KnowledgeRepository
-from adapter.llm.model.profile import DefaultModelProfileModel, ModelProfileVersionModel
-from adapter.llm.repository.profile import SqlAlchemyModelProfileRepository
+from adapter.llm.model import DefaultModelProfileModel, ModelProfileVersionModel
+from adapter.llm.repository import SqlAlchemyModelProfileRepository
 from adapter.mcp.model import McpServerModel, McpToolModel
 from adapter.mcp.repository import SqlAlchemyMcpRepository
 from adapter.message.model import ConversationMessageModel, ExecutionMessageModel
-from adapter.message.repository.message import SqlAlchemyMessageRepository
+from adapter.message.repository import SqlAlchemyMessageRepository
 from adapter.org.model import DepartmentModel, DeptAdminScopeModel, UserDepartmentModel
 from adapter.run.model import RunEventModel, RunInputRequestModel, RunModel, RunToolCallModel
 from adapter.run.repository import SqlAlchemyRunRepository

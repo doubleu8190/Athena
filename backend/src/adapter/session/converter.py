@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from adapter.session.model.session import SessionModel
+from adapter.session.model import SessionModel
 from common.date import as_utc
 from domain.session import Session
 

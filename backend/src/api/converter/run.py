@@ -23,7 +23,7 @@ from api.dto.run import (
     SafeSkillApprovalProjectionResponse,
     SubagentTaskResponse,
 )
-from app.run.model.result import RunDetailsResult, RunListResult
+from app.run.results import RunDetailsResult, RunListResult
 from domain.run.model import (
     PendingSubagentApproval,
     PendingSubagentInput,

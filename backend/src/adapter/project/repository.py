@@ -8,8 +8,8 @@ from sqlalchemy import delete, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from adapter.knowledge.model import ProjectKnowledgeBaseModel
-from adapter.project.converter.project import project_to_domain
-from adapter.project.model.project import ProjectModel
+from adapter.project.converter import project_to_domain
+from adapter.project.model import ProjectModel
 from adapter.run.model import RunModel
 from adapter.session.model import SessionModel
 from domain.project import (

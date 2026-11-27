@@ -21,7 +21,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from adapter.auth.model import AuthSessionModel, UserModel
 from adapter.auth.repository import SqlAlchemyAuthRepository
-from adapter.llm.model.profile import DefaultModelProfileModel, ModelProfileVersionModel
+from adapter.llm.model import DefaultModelProfileModel, ModelProfileVersionModel
 from adapter.llm.repository import SqlAlchemyModelProfileRepository
 from adapter.message.model import ConversationMessageModel, ExecutionMessageModel
 from adapter.message.repository import SqlAlchemyMessageRepository

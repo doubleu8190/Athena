@@ -11,8 +11,8 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from adapter.auth.repository.transaction_guard import verify_active_session_user
-from adapter.llm.converter.profile import profile_to_domain
-from adapter.llm.model.profile import (
+from adapter.llm.converter import profile_to_domain
+from adapter.llm.model import (
     CompressionPolicyVersionModel,
     CurrentCompressionPolicyModel,
     DefaultModelProfileModel,

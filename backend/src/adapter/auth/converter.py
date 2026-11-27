@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from adapter.auth.model.auth import UserModel
+from adapter.auth.model import UserModel
 from common.date import as_utc
 from domain.auth import AuthProvider, User, UserRole, UserStatus
 

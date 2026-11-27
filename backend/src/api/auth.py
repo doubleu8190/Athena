@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from fastapi import APIRouter, HTTPException, Request, Response, status
 from fastapi.responses import RedirectResponse
 
-from api.converter.auth import mock_users_to_response, user_result_to_response
+from api.converter.auth import mock_users_to_response, user_to_response
 from api.dto.auth import (
     AuthProvidersResponse,
     ChangePasswordRequest,
@@ -104,6 +104,7 @@ def build_auth_router(
             remember_me=request.remember_me,
             client_key=_client_key(http_request),
         )
+        membership = await service.get_user_membership(issued.user.id)
         _set_session_cookie(
             response,
             token=issued.token,
@@ -111,7 +112,7 @@ def build_auth_router(
             config=cookie,
         )
         response.headers["Cache-Control"] = "no-store"
-        return user_result_to_response(issued.user)
+        return user_to_response(issued.user, membership=membership)
 
     @router.get(
         "/feishu/authorize",
@@ -184,8 +185,8 @@ def build_auth_router(
     async def me(current_auth: CurrentAuth, response: Response) -> UserResponse:
         """返回当前有效登录用户的安全资料、所属部门与管辖部门 ID。"""
         response.headers["Cache-Control"] = "no-store"
-        enriched = await service.get_me(current_auth)
-        return user_result_to_response(enriched)
+        membership = await service.get_user_membership(current_auth.user.id)
+        return user_to_response(current_auth.user, membership=membership)
 
     @router.patch("/me", response_model=UserResponse)
     async def update_me(
@@ -198,8 +199,9 @@ def build_auth_router(
             current_auth,
             request.display_name,
         )
+        membership = await service.get_user_membership(updated_user.id)
         response.headers["Cache-Control"] = "no-store"
-        return user_result_to_response(updated_user)
+        return user_to_response(updated_user, membership=membership)
 
     @router.post(
         "/password",
@@ -237,6 +239,7 @@ def build_auth_router(
         ) -> UserResponse:
             """校验目标为活跃 Mock 账号后签发真实服务端会话与 HttpOnly Cookie。"""
             issued = await service.login_mock_user(request.user_id)
+            membership = await service.get_user_membership(issued.user.id)
             _set_session_cookie(
                 response,
                 token=issued.token,
@@ -244,7 +247,7 @@ def build_auth_router(
                 config=cookie,
             )
             response.headers["Cache-Control"] = "no-store"
-            return user_result_to_response(issued.user)
+            return user_to_response(issued.user, membership=membership)
 
     return router
 

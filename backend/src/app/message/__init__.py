@@ -1,9 +1,5 @@
 """消息管理应用层。"""
 
-from app.message.model.result import (
-    ConversationMessagePageResult,
-    ConversationMessageResult,
-)
 from app.message.service import MessageService
 from domain.message import (
     InvalidMessageError,
@@ -13,8 +9,6 @@ from domain.message import (
 )
 
 __all__ = [
-    "ConversationMessagePageResult",
-    "ConversationMessageResult",
     "InvalidMessageError",
     "InvalidMessageReferenceError",
     "MessageConflictError",

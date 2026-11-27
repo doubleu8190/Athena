@@ -8,7 +8,7 @@ from pydantic import TypeAdapter
 from sqlalchemy import func, select
 from sqlalchemy import text as sql_text
 
-from adapter.message.converter.message import conversation_to_domain, execution_to_domain
+from adapter.message.converter import conversation_to_domain, execution_to_domain
 from adapter.message.model import ConversationMessageModel, ExecutionMessageModel
 from adapter.run.converter import (
     context_summary_to_domain,

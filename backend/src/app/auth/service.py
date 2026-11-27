@@ -6,6 +6,7 @@ import asyncio
 import logging
 import unicodedata
 from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 from hashlib import sha256
 from secrets import token_urlsafe
@@ -13,8 +14,6 @@ from typing import Protocol, TypeVar
 
 from email_validator import EmailNotValidError, validate_email
 
-from app.auth.converter.result import user_to_result
-from app.auth.model.result import IssuedAuthResult, UserResult
 from app.auth.oauth_state import (
     InMemoryOAuthStateStore,
     OAuthStateStore,
@@ -47,7 +46,7 @@ from domain.auth import (
     UserRole,
     UserStatus,
 )
-from domain.org import OrgMembershipReader, OrgUserDetail
+from domain.org import OrgMembershipReader, OrgUserDetail, UserOrgMembership
 from infrastructure.feishu import FeishuError, FeishuUserIdentity
 
 logger = logging.getLogger(__name__)
@@ -72,6 +71,16 @@ class FeishuSsoClient(Protocol):
 
     async def exchange_code_for_user(self, code: str) -> FeishuUserIdentity:
         """用一次性 OAuth code 换取飞书用户身份信息。"""
+
+
+@dataclass(frozen=True, slots=True)
+class IssuedAuthResult:
+    """成功登录后返回的用户领域实体与一次性会话 token 信息。"""
+
+    user: User
+    token: str
+    expires_at: datetime
+    max_age_seconds: int
 
 
 def _default_user_id() -> str:
@@ -230,7 +239,7 @@ class AuthService:
         *,
         display_name: str | None = None,
         role: UserRole = UserRole.MEMBER,
-    ) -> UserResult:
+    ) -> User:
         """内部受控置备本地密码账号（不对外开放自助注册 HTTP 接口）。"""
         normalized_email = _normalize_email(email)
         normalized_password = _validate_password(password)
@@ -250,8 +259,7 @@ class AuthService:
             created_at=current,
             updated_at=current,
         )
-        created = await self._repository.create_user(user)
-        return await self._enrich_user(created)
+        return await self._repository.create_user(user)
 
     async def bootstrap_super_admin(
         self,
@@ -343,7 +351,7 @@ class AuthService:
         )
         await self._repository.create_session(auth_session)
         return IssuedAuthResult(
-            user=await self._enrich_user(user),
+            user=user,
             token=token,
             expires_at=auth_session.expires_at,
             max_age_seconds=max_age_seconds,
@@ -401,7 +409,7 @@ class AuthService:
             now=current,
         )
         issued = IssuedAuthResult(
-            user=await self._enrich_user(user),
+            user=user,
             token=token,
             expires_at=expires_at,
             max_age_seconds=DEFAULT_SESSION_SECONDS,
@@ -438,15 +446,17 @@ class AuthService:
         )
         await self._repository.create_session(auth_session)
         return IssuedAuthResult(
-            user=await self._enrich_user(user),
+            user=user,
             token=token,
             expires_at=auth_session.expires_at,
             max_age_seconds=max_age_seconds,
         )
 
-    async def get_me(self, context: AuthContext) -> UserResult:
-        """返回当前登录用户的安全资料，并附带部门归属与部门管理范围。"""
-        return await self._enrich_user(context.user)
+    async def get_user_membership(self, user_id: str) -> UserOrgMembership:
+        """按需读取用户所属活跃部门及已授权管辖部门 ID（供 HTTP 响应拼装使用）。"""
+        if self._org_reader is None:
+            return UserOrgMembership(departments=(), managed_department_ids=())
+        return await self._org_reader.get_user_org_membership(user_id)
 
     async def authenticate(self, token: str) -> AuthContext | None:
         """验证原始 token 并返回有效登录上下文。"""
@@ -530,7 +540,7 @@ class AuthService:
         self,
         context: AuthContext,
         display_name: str | None,
-    ) -> UserResult:
+    ) -> User:
         """更新当前用户显示名，并在持久化边界复核会话。"""
         normalized_display_name = _normalize_display_name(display_name)
         updated = await self._repository.update_display_name(
@@ -541,18 +551,7 @@ class AuthService:
         )
         if updated is None:
             raise InvalidSessionError("invalid_session")
-        return await self._enrich_user(updated)
-
-    async def _enrich_user(self, user: User) -> UserResult:
-        """按需附加用户所属活跃部门及已授权管辖部门 ID。"""
-        if self._org_reader is None:
-            return user_to_result(user)
-        membership = await self._org_reader.get_user_org_membership(user.id)
-        return user_to_result(
-            user,
-            departments=membership.departments,
-            managed_department_ids=membership.managed_department_ids,
-        )
+        return updated
 
     def _new_session(
         self,
@@ -606,6 +605,7 @@ __all__ = [
     "AuthService",
     "DEFAULT_SESSION_SECONDS",
     "FeishuSsoClient",
+    "IssuedAuthResult",
     "MAX_PASSWORD_LENGTH",
     "MIN_PASSWORD_LENGTH",
     "REMEMBER_SESSION_SECONDS",

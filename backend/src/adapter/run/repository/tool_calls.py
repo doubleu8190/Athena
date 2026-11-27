@@ -11,7 +11,7 @@ from adapter.file.repository import (
     count_published_session_files,
     pending_file_to_model,
 )
-from adapter.message.converter.message import execution_to_domain
+from adapter.message.converter import execution_to_domain
 from adapter.message.model import ExecutionMessageModel
 from adapter.run.converter import (
     run_to_domain,

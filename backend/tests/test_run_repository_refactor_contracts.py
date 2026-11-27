@@ -15,7 +15,7 @@ from sqlalchemy import DateTime, event, func, literal
 from adapter.auth.model import UserModel
 from adapter.llm.model import ModelProfileVersionModel
 from adapter.message.model import ConversationMessageModel, ExecutionMessageModel
-from adapter.message.repository.message import SqlAlchemyMessageRepository
+from adapter.message.repository import SqlAlchemyMessageRepository
 from adapter.run.model import RunModel, RunToolCallModel
 from adapter.run.repository import _shared, context_events, lifecycle, tool_calls
 from adapter.run.repository.lifecycle import RunLifecycleMixin

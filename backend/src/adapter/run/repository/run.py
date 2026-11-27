@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from adapter.message.repository.message import SqlAlchemyMessageRepository
+from adapter.message.repository import SqlAlchemyMessageRepository
 from adapter.run.repository.context_events import RunContextEventsMixin
 from adapter.run.repository.lifecycle import RunLifecycleMixin
 from adapter.run.repository.tool_calls import RunToolCallsMixin

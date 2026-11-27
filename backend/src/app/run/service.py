@@ -9,7 +9,7 @@ import unicodedata
 from collections.abc import Callable
 from datetime import datetime
 
-from app.run.model.result import RunDetailsResult, RunListResult
+from app.run.results import RunDetailsResult, RunListResult
 from common.date import as_utc, utc_now
 from common.ids import new_id
 from domain.message import (
@@ -33,6 +33,7 @@ from domain.run.model import (
     SubmitRunResult,
 )
 from domain.run.model.errors import (
+    InvalidRunInputError,
     RunConflictError,
     RunNotFoundError,
     RunStateError,
@@ -55,10 +56,6 @@ MAX_EVENT_PAGE_SIZE = 100
 MAX_RUN_KNOWLEDGE_BASES = 20
 MAX_MODEL_PROFILE_ID_LENGTH = 64
 CURRENT_PROMPT_TEMPLATE_VERSION = "run-v2"
-
-
-class InvalidRunInputError(ValueError):
-    """Run HTTP 用例输入不符合业务约束。"""
 
 
 def _fingerprint(*, operation: str, fields: dict[str, str]) -> str:

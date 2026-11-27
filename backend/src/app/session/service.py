@@ -6,8 +6,6 @@ import unicodedata
 from collections.abc import Callable
 from datetime import datetime
 
-from app.session.converter.result import session_page_to_result, session_to_result
-from app.session.model.result import SessionPageResult, SessionResult
 from common.date import as_utc, utc_now
 from common.ids import new_id
 from domain.project import ProjectNotFoundError
@@ -17,6 +15,7 @@ from domain.session import (
     InvalidSessionUpdateError,
     Session,
     SessionNotFoundError,
+    SessionPage,
     SessionRepository,
     SessionScope,
 )
@@ -106,14 +105,14 @@ class SessionService:
         *,
         title: str | None = None,
         project_id: str | None = None,
-    ) -> SessionResult:
+    ) -> Session:
         """创建未绑定或绑定到当前用户项目的会话。"""
         owner = _normalized_owner_id(owner_id)
         normalized_title = _normalized_title(title)
         normalized_project_id = None if project_id is None else _normalized_project_id(project_id)
 
         current = as_utc(self._clock())
-        session = await self._repository.create(
+        return await self._repository.create(
             Session(
                 id=self._id_factory(),
                 owner_id=owner,
@@ -125,9 +124,8 @@ class SessionService:
                 deleted_time=None,
             )
         )
-        return session_to_result(session)
 
-    async def get(self, owner_id: str, session_id: str) -> SessionResult:
+    async def get(self, owner_id: str, session_id: str) -> Session:
         """读取当前用户可见的未删除会话。"""
         session = await self._repository.get_visible(
             SessionScope(
@@ -137,7 +135,7 @@ class SessionService:
         )
         if session is None:
             raise SessionNotFoundError("session_not_found")
-        return session_to_result(session)
+        return session
 
     async def list(
         self,
@@ -148,7 +146,7 @@ class SessionService:
         project_id: str | None = None,
         unbound: bool = False,
         q: str | None = None,
-    ) -> SessionPageResult:
+    ) -> SessionPage:
         """分页读取当前用户的未删除会话，支持按标题关键字搜索。"""
         owner = _normalized_owner_id(owner_id)
         if page < 1 or not 1 <= page_size <= MAX_PAGE_SIZE:
@@ -164,7 +162,7 @@ class SessionService:
                 raise InvalidSessionFilterError("invalid_session_filter")
             stripped = q.strip()
             normalized_query = stripped or None
-        result = await self._repository.list_active(
+        return await self._repository.list_active(
             owner,
             project_id=normalized_project_id,
             unbound=unbound,
@@ -172,7 +170,6 @@ class SessionService:
             limit=page_size,
             query=normalized_query,
         )
-        return session_page_to_result(result)
 
     async def update(
         self,
@@ -183,7 +180,7 @@ class SessionService:
         title: str | None = None,
         update_project: bool = False,
         project_id: str | None = None,
-    ) -> SessionResult:
+    ) -> Session:
         """修改标题或尚未被首条消息锁定的项目绑定。"""
         if not update_title and not update_project:
             raise InvalidSessionUpdateError("session_update_invalid")
@@ -208,7 +205,7 @@ class SessionService:
         )
         if session is None:
             raise SessionNotFoundError("session_not_found")
-        return session_to_result(session)
+        return session
 
     async def delete(self, owner_id: str, session_id: str) -> None:
         """软删除当前用户的会话，并允许重复删除。"""

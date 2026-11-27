@@ -14,7 +14,6 @@ from pathlib import Path
 
 from app.access import AccessPolicyService
 from app.skill.dependency import DependencyChecker
-from app.skill.model import SkillAdminDetails, SkillResourceSlice
 from app.skill.package import (
     SkillPackageValidator,
     ValidatedSkillPackage,
@@ -31,6 +30,7 @@ from app.skill.personal import (
     validate_starter_prompt,
     validate_version_label,
 )
+from app.skill.results import SkillAdminDetails, SkillResourceSlice
 from common.async_utils import run_thread_shielded
 from common.date import utc_now
 from common.ids import new_id

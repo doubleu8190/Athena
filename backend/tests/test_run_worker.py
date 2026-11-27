@@ -1234,7 +1234,7 @@ def test_sqlalchemy_run_repository_get_lease_state_projects_scalars_and_enforces
     from sqlalchemy import event
 
     from adapter.auth.model import UserModel
-    from adapter.llm.model.profile import ModelProfileVersionModel
+    from adapter.llm.model import ModelProfileVersionModel
     from adapter.message.model import ConversationMessageModel
     from adapter.message.repository import SqlAlchemyMessageRepository
     from adapter.run.model import RunModel

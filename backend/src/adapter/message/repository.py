@@ -8,7 +8,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm import aliased
 
-from adapter.message.converter.message import (
+from adapter.message.converter import (
     conversation_to_domain,
     deserialize_parts,
     execution_to_domain,

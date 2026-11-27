@@ -12,15 +12,15 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from adapter.file.model import SessionFileModel
-from adapter.llm.model.profile import (
+from adapter.llm.model import (
     CurrentCompressionPolicyModel,
     DefaultModelProfileModel,
     ModelProfileVersionModel,
 )
 from adapter.mcp.model import McpServerModel, McpToolModel
-from adapter.message.converter.message import conversation_to_domain, execution_to_domain
+from adapter.message.converter import conversation_to_domain, execution_to_domain
 from adapter.message.model import ConversationMessageModel, ExecutionMessageModel
-from adapter.message.repository.message import SqlAlchemyMessageRepository
+from adapter.message.repository import SqlAlchemyMessageRepository
 from adapter.run.converter import (
     event_payload_to_json,
     run_to_domain,

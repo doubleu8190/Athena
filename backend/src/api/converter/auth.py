@@ -1,4 +1,4 @@
-"""认证应用结果到 HTTP DTO 转换。"""
+"""认证领域模型到 HTTP DTO 转换。"""
 
 from __future__ import annotations
 
@@ -8,8 +8,8 @@ from api.dto.auth import (
     UserDepartmentItem,
     UserResponse,
 )
-from app.auth import UserResult
-from domain.org import OrgUserDetail, UserDepartmentSummary
+from domain.auth import User
+from domain.org import OrgUserDetail, UserDepartmentSummary, UserOrgMembership
 
 
 def department_summary_to_dto(item: UserDepartmentSummary) -> UserDepartmentItem:
@@ -17,9 +17,27 @@ def department_summary_to_dto(item: UserDepartmentSummary) -> UserDepartmentItem
     return UserDepartmentItem.model_validate(item)
 
 
-def user_result_to_response(user: UserResult) -> UserResponse:
-    """转换安全用户响应（Pydantic 仅投影 DTO 显式声明字段，自动忽略敏感属性）。"""
-    return UserResponse.model_validate(user)
+def user_to_response(
+    user: User,
+    *,
+    membership: UserOrgMembership | None = None,
+) -> UserResponse:
+    """将领域 User 与可选组织归属投影为安全用户响应，显式白名单排除 password_hash 等敏感字段。"""
+    departments = () if membership is None else membership.departments
+    managed_department_ids = () if membership is None else membership.managed_department_ids
+    return UserResponse(
+        id=user.id,
+        email=user.email,
+        display_name=user.display_name,
+        created_at=user.created_at,
+        role=user.role,
+        auth_provider=user.auth_provider,
+        employee_no=user.employee_no,
+        job_title=user.job_title,
+        avatar_url=user.avatar_url,
+        departments=[department_summary_to_dto(dept) for dept in departments],
+        managed_department_ids=list(managed_department_ids),
+    )
 
 
 def mock_users_to_response(items: tuple[OrgUserDetail, ...]) -> MockUserListResponse:
@@ -45,5 +63,5 @@ def mock_users_to_response(items: tuple[OrgUserDetail, ...]) -> MockUserListResp
 __all__ = [
     "department_summary_to_dto",
     "mock_users_to_response",
-    "user_result_to_response",
+    "user_to_response",
 ]

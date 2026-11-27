@@ -15,14 +15,14 @@ from integration.llm_fixtures import TEST_LLM_CIPHER, encrypted_llm_key_fields
 from integration.postgres_harness import isolated_postgres_schema
 from sqlalchemy import func, select, text, update
 
-from adapter.llm.model.profile import DefaultModelProfileModel, ModelProfileVersionModel
+from adapter.llm.model import DefaultModelProfileModel, ModelProfileVersionModel
 from adapter.llm.repository import SqlAlchemyModelProfileRepository
 from adapter.message.model import ConversationMessageModel, ExecutionMessageModel
-from adapter.message.repository.message import SqlAlchemyMessageRepository
+from adapter.message.repository import SqlAlchemyMessageRepository
 from adapter.run.model import RunEventModel, RunModel, RunRequestModel
 from adapter.run.repository import SqlAlchemyRunRepository
 from adapter.session.model import SessionModel
-from adapter.session.repository.session import SqlAlchemySessionRepository
+from adapter.session.repository import SqlAlchemySessionRepository
 from adapter.system_prompt.repository import SqlAlchemySystemPromptRepository
 from app.run.executor import RunExecutor
 from domain.llm.model import (

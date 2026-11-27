@@ -30,14 +30,14 @@ from adapter.auth.model import AuthSessionModel, UserModel
 from adapter.auth.repository import SqlAlchemyAuthRepository
 from adapter.knowledge.model import KnowledgeBaseModel, ProjectKnowledgeBaseModel
 from adapter.knowledge.repository import KnowledgeRepository
-from adapter.llm.model.profile import (
+from adapter.llm.model import (
     CompressionPolicyVersionModel,
     CurrentCompressionPolicyModel,
     DefaultModelProfileModel,
     ModelProfileVersionModel,
 )
 from adapter.llm.repository import SqlAlchemyModelProfileRepository
-from adapter.message.repository.message import SqlAlchemyMessageRepository
+from adapter.message.repository import SqlAlchemyMessageRepository
 from adapter.org.model import DepartmentModel, UserDepartmentModel
 from adapter.project.model import ProjectModel
 from adapter.project.repository import SqlAlchemyProjectRepository

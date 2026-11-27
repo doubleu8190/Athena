@@ -18,7 +18,7 @@ from adapter.access.repository import (
     sync_resource_grants_in_session,
 )
 from adapter.auth.repository.transaction_guard import verify_active_session_user
-from adapter.mcp.converter.mcp import (
+from adapter.mcp.converter import (
     server_to_domain,
     tool_to_admin,
     tool_to_public,

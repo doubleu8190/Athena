@@ -5,6 +5,10 @@ class RunError(ValueError):
     """Run 状态或命令冲突。"""
 
 
+class InvalidRunInputError(ValueError):
+    """Run 用例输入不符合业务约束。"""
+
+
 class RunConflictError(RunError):
     """活跃任务或同幂等键异内容冲突。"""
 
@@ -34,6 +38,7 @@ class ToolRetryConfirmationRequiredError(RunConflictError):
 
 
 __all__ = [
+    "InvalidRunInputError",
     "RunConflictError",
     "RunError",
     "RunInputResourceError",

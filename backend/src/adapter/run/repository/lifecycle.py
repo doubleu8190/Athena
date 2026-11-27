@@ -16,10 +16,10 @@ from adapter.access.repository import (
     load_user_access_snapshot_in_session,
 )
 from adapter.knowledge.model import KnowledgeBaseModel
-from adapter.llm.model.profile import (
+from adapter.llm.model import (
     ModelProfileVersionModel,
 )
-from adapter.message.converter.message import conversation_to_domain, execution_to_domain
+from adapter.message.converter import conversation_to_domain, execution_to_domain
 from adapter.message.model import ConversationMessageModel, ExecutionMessageModel
 from adapter.project.model import ProjectModel
 from adapter.run.converter import (

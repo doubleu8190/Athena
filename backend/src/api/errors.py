@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import sys
 from collections.abc import Callable, Coroutine
 from typing import Any
 
@@ -24,7 +25,6 @@ from app.knowledge.service import (
     KnowledgeSearchUnavailableError,
 )
 from app.project.knowledge import KnowledgeNotFoundError as ProjectKnowledgeNotFoundError
-from app.run.service import InvalidRunInputError
 from app.skill.personal import PersonalSkillError
 from app.skill.service import SkillAuthorizationError, SkillUserAuthorizationError
 from domain.access import AccessPermissionDeniedError, InvalidVisibilityConfigError
@@ -96,6 +96,7 @@ from domain.project import (
     ProjectNotFoundError,
 )
 from domain.run.model.errors import (
+    InvalidRunInputError,
     RunConflictError,
     RunInputResourceError,
     RunKnowledgeBaseNotFoundError,
@@ -133,7 +134,6 @@ from domain.system_prompt import (
     SystemPromptNotFoundError,
     SystemPromptUnavailableError,
 )
-from infrastructure.feishu import FeishuError
 
 # 静态一对一映射表：(异常类型或元组, HTTP 状态码, 固定 detail 或 detail 提取函数)。
 # 匹配按列表顺序进行，子类异常务必排在父类之前。
@@ -324,7 +324,6 @@ _STATIC_ERROR_RULES: tuple[_ErrorRule, ...] = (
         _error_code,
     ),
     ((LastSuperAdminProtectedError, FeishuNotEnabledError), status.HTTP_409_CONFLICT, _error_code),
-    (FeishuError, status.HTTP_502_BAD_GATEWAY, "feishu_sync_failed"),
     # --- Project ---
     (ProjectNotFoundError, status.HTTP_404_NOT_FOUND, "project_not_found"),
     (InvalidProjectNameError, status.HTTP_422_UNPROCESSABLE_CONTENT, "project_name_invalid"),
@@ -423,6 +422,15 @@ _STATIC_ERROR_RULES: tuple[_ErrorRule, ...] = (
 )
 
 
+def _is_feishu_error(error: Exception) -> bool:
+    """延迟判定飞书外部传输异常，避免 api.errors 在模块导入期拉起 infrastructure.feishu。"""
+    feishu_module = sys.modules.get("infrastructure.feishu.client")
+    if feishu_module is None:
+        return False
+    feishu_error_type = getattr(feishu_module, "FeishuError", None)
+    return isinstance(feishu_error_type, type) and isinstance(error, feishu_error_type)
+
+
 def domain_error_to_http(error: Exception) -> HTTPException | None:
     """将已注册领域异常转换为等价 HTTPException；未注册异常返回 None 交由上层处理。"""
     # 需依据错误码动态决策状态码或结构化 detail 的少量领域异常优先分派。
@@ -440,6 +448,11 @@ def domain_error_to_http(error: Exception) -> HTTPException | None:
             detail = detail_spec(error) if callable(detail_spec) else detail_spec
             return HTTPException(status_code=status_code, detail=detail)
 
+    if _is_feishu_error(error):
+        return HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="feishu_sync_failed",
+        )
     if isinstance(error, PreferenceError):
         return _preference_http(error)
     return None
@@ -459,7 +472,7 @@ class DomainErrorRoute(APIRoute):
                 if mapped is None:
                     raise
                 # 飞书外部传输异常截断底层异常链，避免意外暴露上游细节。
-                if isinstance(error, FeishuError):
+                if _is_feishu_error(error):
                     raise mapped from None
                 raise mapped from error
 

@@ -22,11 +22,11 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 from adapter.access import ResourceVisibilityGrantModel, SqlAlchemyAccessControlRepository
 from adapter.auth.model import AuthSessionModel, UserModel
 from adapter.auth.repository import SqlAlchemyAuthRepository
-from adapter.llm.model.profile import ModelProfileVersionModel
+from adapter.llm.model import ModelProfileVersionModel
 from adapter.llm.repository import SqlAlchemyModelProfileRepository
 from adapter.mcp.model import McpServerModel, McpToolModel
 from adapter.mcp.repository import SqlAlchemyMcpRepository
-from adapter.message.repository.message import SqlAlchemyMessageRepository
+from adapter.message.repository import SqlAlchemyMessageRepository
 from adapter.org.model import DepartmentModel, UserDepartmentModel
 from adapter.run.model import RunModel
 from adapter.run.repository import SqlAlchemyRunRepository

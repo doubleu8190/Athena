@@ -8,8 +8,8 @@ from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from adapter.auth.converter.auth import user_to_domain
-from adapter.auth.model.auth import AuthSessionModel, UserModel
+from adapter.auth.converter import user_to_domain
+from adapter.auth.model import AuthSessionModel, UserModel
 from adapter.auth.repository.transaction_guard import SqlAlchemyAuthTransactionGuard
 from domain.auth import (
     AdminPromotionError,

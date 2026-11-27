@@ -8,8 +8,8 @@ from datetime import datetime
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from adapter.auth.converter.auth import user_to_domain
-from adapter.auth.model.auth import AuthSessionModel, UserModel
+from adapter.auth.converter import user_to_domain
+from adapter.auth.model import AuthSessionModel, UserModel
 from common.date import as_utc, utc_now
 from domain.auth import User, UserStatus
 

@@ -11,7 +11,7 @@ from typing import Any, cast
 import pytest
 from access_support import make_test_access_policy
 
-from app.skill.model import SkillAdminDetails
+from app.skill.results import SkillAdminDetails
 from app.skill.service import SkillAuthorizationError, SkillService
 from domain.auth import AuthContext, User, UserRole, UserStatus
 from domain.skill import (

@@ -32,7 +32,7 @@ from adapter.file import (
     SqlAlchemySessionFileRepository,
 )
 from adapter.file.storage import FileStorageError
-from adapter.llm.model.profile import DefaultModelProfileModel, ModelProfileVersionModel
+from adapter.llm.model import DefaultModelProfileModel, ModelProfileVersionModel
 from adapter.llm.repository import SqlAlchemyModelProfileRepository
 from adapter.message.repository import SqlAlchemyMessageRepository
 from adapter.run.model import RunToolCallModel

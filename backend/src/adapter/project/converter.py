@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from adapter.project.model.project import ProjectModel
+from adapter.project.model import ProjectModel
 from common.date import as_utc
 from domain.project import Project
 

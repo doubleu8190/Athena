@@ -3,7 +3,7 @@
 from dataclasses import fields
 from typing import Literal, cast
 
-from adapter.llm.model.profile import ModelProfileVersionModel
+from adapter.llm.model import ModelProfileVersionModel
 from common.date import as_utc
 from domain.llm.model.profile import ModelProfileVersion
 

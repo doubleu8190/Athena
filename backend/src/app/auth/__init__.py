@@ -1,6 +1,5 @@
 """认证应用层。"""
 
-from app.auth.model.result import IssuedAuthResult, UserResult
 from app.auth.oauth_state import (
     InMemoryOAuthStateStore,
     OAuthStatePayload,
@@ -15,6 +14,7 @@ from app.auth.service import (
     REMEMBER_SESSION_SECONDS,
     AuthService,
     FeishuSsoClient,
+    IssuedAuthResult,
 )
 from domain.auth import (
     AdminPromotionError,
@@ -67,6 +67,5 @@ __all__ = [
     "RedisOAuthStateStore",
     "SsoAuthenticationError",
     "UserDisabledError",
-    "UserResult",
     "validate_safe_return_to",
 ]

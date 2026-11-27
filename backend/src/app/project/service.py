@@ -6,8 +6,6 @@ import unicodedata
 from collections.abc import Callable, Sequence
 from datetime import datetime
 
-from app.project.converter.result import project_page_to_result, project_to_result
-from app.project.model.result import ProjectPageResult, ProjectResult
 from common.date import as_utc, utc_now
 from common.ids import new_id
 from domain.project import (
@@ -15,6 +13,7 @@ from domain.project import (
     InvalidProjectNameError,
     Project,
     ProjectNotFoundError,
+    ProjectPage,
     ProjectRepository,
 )
 
@@ -132,7 +131,7 @@ class ProjectService:
         description: str | None = None,
         instructions: str | None = None,
         default_skill_ids: Sequence[str] | None = None,
-    ) -> ProjectResult:
+    ) -> Project:
         """创建允许重名的规范化项目，可选携带简介、背景指令与默认技能列表。"""
         owner = _normalized_owner_id(owner_id)
         normalized = _normalize_name(name)
@@ -140,7 +139,7 @@ class ProjectService:
         normalized_instructions = _normalize_instructions(instructions)
         normalized_skills = _normalize_default_skill_ids(default_skill_ids)
         current = as_utc(self._clock())
-        project = await self._repository.create(
+        return await self._repository.create(
             Project(
                 id=self._id_factory(),
                 owner_id=owner,
@@ -152,9 +151,8 @@ class ProjectService:
                 default_skill_ids=normalized_skills,
             )
         )
-        return project_to_result(project)
 
-    async def get(self, owner_id: str, project_id: str) -> ProjectResult:
+    async def get(self, owner_id: str, project_id: str) -> Project:
         """读取未删除项目。"""
         project = await self._repository.get(
             _normalized_owner_id(owner_id),
@@ -162,7 +160,7 @@ class ProjectService:
         )
         if project is None:
             raise ProjectNotFoundError("project_not_found")
-        return project_to_result(project)
+        return project
 
     async def list(
         self,
@@ -170,17 +168,16 @@ class ProjectService:
         *,
         page: int,
         page_size: int,
-    ) -> ProjectPageResult:
+    ) -> ProjectPage:
         """分页读取未删除项目。"""
         owner = _normalized_owner_id(owner_id)
         if page < 1 or not 1 <= page_size <= MAX_PAGE_SIZE:
             raise ValueError("invalid_pagination")
-        result = await self._repository.list_active(
+        return await self._repository.list_active(
             owner,
             offset=(page - 1) * page_size,
             limit=page_size,
         )
-        return project_page_to_result(result)
 
     async def update(
         self,
@@ -195,7 +192,7 @@ class ProjectService:
         instructions: str | None = None,
         update_default_skills: bool = False,
         default_skill_ids: Sequence[str] | None = None,
-    ) -> ProjectResult:
+    ) -> Project:
         """局部更新未删除项目的名称、简介、背景指令或默认技能集合。"""
         if not any((update_name, update_description, update_instructions, update_default_skills)):
             raise InvalidProjectInputError("project_update_invalid")
@@ -227,7 +224,7 @@ class ProjectService:
         )
         if project is None:
             raise ProjectNotFoundError("project_not_found")
-        return project_to_result(project)
+        return project
 
     async def delete(
         self,

@@ -2,9 +2,8 @@
 
 from __future__ import annotations
 
-from app.message.converter.result import conversation_page_to_result
-from app.message.model.result import ConversationMessagePageResult
 from domain.message import (
+    ConversationMessagePage,
     InvalidMessageError,
     MessageRepository,
     SessionNotFoundError,
@@ -41,7 +40,7 @@ class MessageService:
         viewer_id: str,
         before_sequence: int | None = None,
         limit: int = 20,
-    ) -> ConversationMessagePageResult:
+    ) -> ConversationMessagePage:
         """按所有者读取会话历史，不返回执行轨迹。"""
         _require_identifier(
             session_id,
@@ -61,7 +60,7 @@ class MessageService:
         )
         if page is None:
             raise SessionNotFoundError("session_not_found")
-        return conversation_page_to_result(page)
+        return page
 
 
 __all__ = ["MAX_PAGE_SIZE", "MessageService"]

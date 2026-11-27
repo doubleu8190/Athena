@@ -27,13 +27,13 @@ from adapter.file.model import SessionFileModel
 from adapter.llm.model import ModelProfileVersionModel
 from adapter.llm.repository import SqlAlchemyModelProfileRepository
 from adapter.message.model import ConversationMessageModel, ExecutionMessageModel
-from adapter.message.repository.message import SqlAlchemyMessageRepository
+from adapter.message.repository import SqlAlchemyMessageRepository
 from adapter.run.model import RunInputRequestModel, RunModel, RunToolCallModel
 from adapter.run.repository.run import SqlAlchemyRunRepository
 from adapter.session.model import SessionModel
-from adapter.session.repository.session import SqlAlchemySessionRepository
+from adapter.session.repository import SqlAlchemySessionRepository
 from adapter.subagent.model import SubagentModel
-from adapter.subagent.repository.subagent import SqlAlchemySubagentRepository
+from adapter.subagent.repository import SqlAlchemySubagentRepository
 from adapter.system_prompt.model import SystemPromptSettingModel, SystemPromptVersionModel
 from app.access import AccessPolicyService
 from app.run.config import RunWorkerConfig
@@ -249,7 +249,7 @@ async def _setup_db(
             ]
         )
         await session.flush()
-        from adapter.llm.model.profile import DefaultModelProfileModel
+        from adapter.llm.model import DefaultModelProfileModel
 
         session.add_all(
             [

@@ -1405,7 +1405,7 @@ def test_knowledge_search_skip_access_check_and_mid_search_transfer_revocation()
 def test_run_submit_and_retry_reuse_single_access_snapshot_in_transaction(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """验证 RunLifecycleMixin.submit/retry 同事务内仅加载 1 次用户权限快照并严格拦截越权资源。"""
+    """验证 RunLifecycleStore.submit/retry 同事务内仅加载 1 次用户权限快照并严格拦截越权资源。"""
 
     async def _scenario() -> None:
         engine, factory = await _create_pg_db(monkeypatch)

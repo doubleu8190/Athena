@@ -32,7 +32,6 @@ from adapter.run.model import (
     RunToolCallModel,
 )
 from adapter.run.repository._approval_helpers import (
-    fail_run_in_transaction,
     has_unsettled_tool_calls,
     load_pending_approvals_in_session,
     settle_unfinished_tool_calls,
@@ -1581,3 +1580,34 @@ class RunLifecycleStore:
             thread_id=row.thread_id,
             question_message_id=question_message_id,
         )
+
+
+async def fail_run_in_transaction(
+    session: AsyncSession,
+    message_repo: SqlAlchemyMessageRepository,
+    locked_session: SessionModel,
+    run: RunModel,
+    safe_error_code: str,
+    failed_at: datetime,
+) -> None:
+    """在已有 Session -> Run 锁与事务内结算未完成调用并原子提交 FAILED 终态。"""
+    await settle_unfinished_tool_calls(
+        session,
+        message_repo,
+        locked_session,
+        run,
+        failed_at,
+    )
+    run.status = RunStatus.FAILED.value
+    run.safe_error_code = safe_error_code
+    run.finished_at = failed_at
+    run.updated_at = failed_at
+    clear_lease(run)
+    await close_pending_input(session, run, failed_at)
+    await append_event(
+        session,
+        run,
+        RunFailedPayload(safe_error_code=safe_error_code),
+        failed_at,
+    )
+    await try_wake_parent_run(session, message_repo, locked_session, run, failed_at)

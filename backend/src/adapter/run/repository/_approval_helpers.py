@@ -15,11 +15,7 @@ from adapter.message.converter import execution_to_domain
 from adapter.message.model import ExecutionMessageModel
 from adapter.message.repository import SqlAlchemyMessageRepository
 from adapter.run.model import RunModel, RunToolCallModel
-from adapter.run.repository._tx_helpers import (
-    append_event,
-    clear_lease,
-    close_pending_input,
-)
+from adapter.run.repository._tx_helpers import append_event
 from adapter.session.model import SessionModel
 from adapter.skill.model import SkillExecutionModel
 from common.ids import new_id
@@ -31,11 +27,7 @@ from domain.message import (
     ToolResultPart,
     ToolResultStatus,
 )
-from domain.run.model import (
-    RunFailedPayload,
-    RunStatus,
-    RunToolCallFinishedPayload,
-)
+from domain.run.model import RunToolCallFinishedPayload
 from domain.skill import (
     SKILL_EXECUTE_TOOL_ID,
     SKILL_LOAD_TOOL_ID,
@@ -460,36 +452,3 @@ async def settle_unfinished_tool_calls(
             ),
             settled_at,
         )
-
-
-async def fail_run_in_transaction(
-    session: AsyncSession,
-    message_repo: SqlAlchemyMessageRepository,
-    locked_session: SessionModel,
-    run: RunModel,
-    safe_error_code: str,
-    failed_at: datetime,
-) -> None:
-    """在已有 Session -> Run 锁与事务内结算未完成调用并原子提交 FAILED 终态。"""
-    from adapter.run.repository._subagent_helpers import try_wake_parent_run
-
-    await settle_unfinished_tool_calls(
-        session,
-        message_repo,
-        locked_session,
-        run,
-        failed_at,
-    )
-    run.status = RunStatus.FAILED.value
-    run.safe_error_code = safe_error_code
-    run.finished_at = failed_at
-    run.updated_at = failed_at
-    clear_lease(run)
-    await close_pending_input(session, run, failed_at)
-    await append_event(
-        session,
-        run,
-        RunFailedPayload(safe_error_code=safe_error_code),
-        failed_at,
-    )
-    await try_wake_parent_run(session, message_repo, locked_session, run, failed_at)

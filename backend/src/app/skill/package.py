@@ -22,6 +22,7 @@ from common.json_schema import (
     ensure_object_root_schema,
     format_validation_path,
 )
+from common.safe_path import safe_relative_posix_parts
 from domain.skill import (
     MAX_GUIDE_CHARACTERS,
     MAX_PACKAGE_FILE_BYTES,
@@ -238,19 +239,14 @@ def _checked_parameter_schema(schema: Any) -> dict[str, Any]:
 def _validated_member_path(info: zipfile.ZipInfo) -> tuple[str, tuple[str, ...]]:
     """只使用原始成员名做未归一化路径安全检查。"""
     raw = info.orig_filename
-    if not raw or "\\" in raw or _CONTROL.search(raw):
-        raise _member_error("skill_zip_path_invalid", raw)
-    path = raw[:-1] if raw.endswith("/") else raw
-    segments = tuple(path.split("/"))
-    if (
-        not path
-        or path.startswith("/")
-        or (len(path) >= 2 and path[1] == ":")
-        or any(part in {"", ".", ".."} for part in segments)
-    ):
-        raise _member_error("skill_zip_path_invalid", raw)
     if len(raw) > 512:
         raise _member_error("skill_zip_path_invalid", raw)
+    try:
+        segments = safe_relative_posix_parts(raw, allow_trailing_slash=True)
+    except ValueError as error:
+        raise _member_error("skill_zip_path_invalid", raw) from error
+    # 目录项在统一校验后剥离单个尾部斜杠，保持后续 manifest 规范路径与去重逻辑一致。
+    path = raw[:-1] if raw.endswith("/") else raw
     return path, segments
 
 

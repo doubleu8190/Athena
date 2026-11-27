@@ -57,6 +57,8 @@ from domain.tool import (
 
 logger = logging.getLogger(__name__)
 
+_INPUT_WRITE_BUFFER_BYTES = 1024 * 1024
+
 
 class _DirectoryPreparationCancelled(Exception):
     """后台工作目录准备线程收到协同取消信号。"""
@@ -484,16 +486,24 @@ class SkillExecutionService:
                 destination,
                 name="athena-skill-input-open",
             )
+            buffer = bytearray()
             try:
                 async for chunk in self._object_store.iter_range(file.object_key):
+                    if not chunk:
+                        continue
                     size += len(chunk)
-                    await run_thread_shielded(
-                        _write_and_hash_chunk,
-                        target,
-                        chunk,
-                        digest,
-                        name="athena-skill-input-write",
-                    )
+                    # 将小块先聚合至 1 MiB 再批量下放工作线程落盘，减少线程切换开销；
+                    # 超大块先刷出已有缓冲后直接落盘，避免额外内存拷贝。
+                    if len(chunk) >= _INPUT_WRITE_BUFFER_BYTES:
+                        if buffer:
+                            await _flush_input_buffer(target, buffer, digest)
+                        await _write_input_chunk(target, chunk, digest)
+                        continue
+                    buffer.extend(chunk)
+                    if len(buffer) >= _INPUT_WRITE_BUFFER_BYTES:
+                        await _flush_input_buffer(target, buffer, digest)
+                if buffer:
+                    await _flush_input_buffer(target, buffer, digest)
             finally:
                 # 无论正常完成还是取消，均在工作线程安全关闭句柄后再释放目录；
                 # 无活跃异常时保留关闭期间收到的取消信号或关闭失败，避免静默吞噬。
@@ -675,6 +685,32 @@ def _write_and_hash_chunk(
     """在工作线程合并写盘与 SHA-256 增量摘要，避免大块数据阻塞事件循环。"""
     digest.update(chunk)
     target.write(chunk)
+
+
+async def _write_input_chunk(
+    target: BinaryIO,
+    chunk: bytes,
+    digest: Any,
+) -> None:
+    """在抗取消护盾的工作线程中写入一块输入字节并增量更新 SHA-256。"""
+    await run_thread_shielded(
+        _write_and_hash_chunk,
+        target,
+        chunk,
+        digest,
+        name="athena-skill-input-write",
+    )
+
+
+async def _flush_input_buffer(
+    target: BinaryIO,
+    buffer: bytearray,
+    digest: Any,
+) -> None:
+    """复制当前有界写缓冲并立即清空，再下放工作线程批量落盘。"""
+    payload = bytes(buffer)
+    buffer.clear()
+    await _write_input_chunk(target, payload, digest)
 
 
 def _extract_package_files_sync(

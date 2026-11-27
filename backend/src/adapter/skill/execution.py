@@ -19,11 +19,15 @@ import sys
 from collections.abc import AsyncGenerator, Coroutine, Mapping
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 from typing import Any, NoReturn
 
 from common.async_utils import await_task_shielded
 from common.json import dumps
+from common.safe_path import (
+    reject_existing_symlink_components,
+    safe_relative_posix_parts,
+)
 from domain.skill.execution import (
     JsonValue,
     ScriptCleanupErrorCode,
@@ -396,17 +400,13 @@ class PythonScriptExecutor(ScriptExecutionPort):
 
     def _relative_script_path(self, working_root: Path, script_path: str) -> Path:
         """校验登记脚本必须是工作目录内 ``scripts/*.py`` 普通文件且无 symlink 穿越。"""
-        relative = PurePosixPath(script_path)
-        if (
-            relative.is_absolute()
-            or "\\" in script_path
-            or "\x00" in script_path
-            or not script_path.startswith("scripts/")
-            or not script_path.endswith(".py")
-            or any(part in {"", ".", ".."} for part in script_path.split("/"))
-        ):
+        try:
+            parts = safe_relative_posix_parts(script_path)
+        except ValueError as error:
+            raise ScriptExecutionConfigurationError("script_path_invalid") from error
+        if parts[0] != "scripts" or not parts[-1].endswith(".py"):
             raise ScriptExecutionConfigurationError("script_path_invalid")
-        script = working_root.joinpath(*relative.parts)
+        script = working_root.joinpath(*parts)
         self._require_regular_contained_file(
             working_root,
             script,
@@ -702,7 +702,7 @@ class PythonScriptExecutor(ScriptExecutionPort):
             if not self._valid_manifest_label(label):
                 return (), ScriptExecutionErrorCode.MANIFEST_INVALID
 
-            source_path = output_directory.joinpath(*PurePosixPath(normalized).parts)
+            source_path = output_directory.joinpath(*normalized.split("/"))
             # 先逐段拒绝符号链接组件再 lstat 普通文件，与 _require_regular_contained_file 保持一致。
             try:
                 self._reject_existing_symlink_components(output_directory, source_path)
@@ -770,17 +770,15 @@ class PythonScriptExecutor(ScriptExecutionPort):
             raise ScriptExecutionConfigurationError(
                 "script_path_outside_working_directory"
             ) from error
-        current = working_root
-        for part in relative.parts:
-            current = current / part
-            try:
-                current_stat = current.lstat()
-            except FileNotFoundError:
-                continue
-            except OSError as error:
-                raise ScriptExecutionConfigurationError("script_path_invalid") from error
-            if stat.S_ISLNK(current_stat.st_mode):
-                raise ScriptExecutionConfigurationError("script_path_link_not_allowed")
+        reject_existing_symlink_components(
+            working_root,
+            relative.parts,
+            error_factory=lambda reason: ScriptExecutionConfigurationError(
+                "script_path_link_not_allowed"
+                if reason == "safe_path_symlink_not_allowed"
+                else "script_path_invalid"
+            ),
+        )
 
     def _remove_working_directory(
         self,
@@ -798,22 +796,14 @@ class PythonScriptExecutor(ScriptExecutionPort):
     @staticmethod
     def _normalize_manifest_path(path: str) -> str | None:
         """规范化清单输出路径，拒绝绝对路径、控制字符、反斜杠、越界段与 manifest.json 自引用。"""
-        if (
-            not path
-            or "\x00" in path
-            or "\\" in path
-            or any(ord(ch) < 32 or ord(ch) == 127 for ch in path)
-        ):
+        try:
+            parts = safe_relative_posix_parts(path)
+        except ValueError:
             return None
-        relative = PurePosixPath(path)
-        if (
-            relative.is_absolute()
-            or relative.as_posix() != path
-            or path == "manifest.json"
-            or any(part in {"", ".", ".."} for part in path.split("/"))
-        ):
+        normalized = "/".join(parts)
+        if normalized == "manifest.json":
             return None
-        return relative.as_posix()
+        return normalized
 
     @staticmethod
     def _valid_manifest_label(label: str) -> bool:

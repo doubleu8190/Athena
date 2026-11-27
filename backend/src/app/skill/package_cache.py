@@ -4,13 +4,18 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
-import stat
 from collections import OrderedDict
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 
 from common.async_utils import await_task_shielded
+from common.safe_path import (
+    resolve_safe_child_path as _resolve_safe_child_path,
+)
+from common.safe_path import (
+    safe_relative_posix_parts as _safe_relative_posix_parts,
+)
 from domain.skill import SkillVersion
 
 DEFAULT_SKILL_CACHE_MAX_ENTRIES = 16
@@ -27,46 +32,19 @@ class _InFlightFetch:
 
 
 def safe_relative_posix_parts(path: str) -> tuple[str, ...]:
-    """防御性校验资源路径为纯相对 POSIX 路径，拒绝穿越、反斜杠、空字节与控制字符。"""
-    if (
-        not isinstance(path, str)
-        or not path
-        or "\x00" in path
-        or "\\" in path
-        or path.startswith("/")
-        or (len(path) >= 2 and path[1] == ":")
-        or any(ord(ch) < 32 or ord(ch) == 127 for ch in path)
-    ):
-        raise ValueError("skill_package_integrity_invalid")
-    parts = tuple(path.split("/"))
-    if any(part in {"", ".", ".."} for part in parts):
-        raise ValueError("skill_package_integrity_invalid")
-    posix = PurePosixPath(path)
-    if posix.is_absolute() or posix.as_posix() != path:
-        raise ValueError("skill_package_integrity_invalid")
-    return parts
+    """防御性校验资源路径为纯相对 POSIX 路径，并维持既有完整性错误码。"""
+    try:
+        return _safe_relative_posix_parts(path)
+    except ValueError as error:
+        raise ValueError("skill_package_integrity_invalid") from error
 
 
 def resolve_safe_child_path(base_root: Path, relative_path: str) -> Path:
-    """将已校验相对路径解析到根目录内，并拒绝路径沿途存在任何符号链接。"""
-    parts = safe_relative_posix_parts(relative_path)
-    resolved_root = base_root.resolve(strict=True)
-    current = resolved_root
-    for part in parts:
-        current = current / part
-        try:
-            current_stat = current.lstat()
-        except FileNotFoundError:
-            continue
-        except OSError as error:
-            raise ValueError("skill_package_integrity_invalid") from error
-        if stat.S_ISLNK(current_stat.st_mode):
-            raise ValueError("skill_package_integrity_invalid")
-    candidate = resolved_root.joinpath(*parts)
-    resolved_candidate = candidate.resolve(strict=False)
-    if resolved_candidate == resolved_root or not resolved_candidate.is_relative_to(resolved_root):
-        raise ValueError("skill_package_integrity_invalid")
-    return candidate
+    """将已校验相对路径解析到根目录内并拒绝 symlink，维持既有完整性错误码。"""
+    try:
+        return _resolve_safe_child_path(base_root, relative_path)
+    except ValueError as error:
+        raise ValueError("skill_package_integrity_invalid") from error
 
 
 class SkillPackageCache:

@@ -14,8 +14,12 @@ class KnowledgeBaseRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     name: str = Field(min_length=1, max_length=120)
     description: str | None = Field(default=None, max_length=500)
+    # 可见层级：personal 仅本人可读可管；company 全员可读（仅超管可管）；
+    # department 需配合 owner_department_id 使用，按归属部门与 visibility_grants 鉴权。
     visibility_scope: Literal["company", "department", "personal"] = "personal"
     owner_department_id: str | None = Field(default=None, min_length=1, max_length=64)
+    # 部门级精准读授权清单（仅 visibility_scope="department" 时允许传非空列表）：
+    # 不传（None）自动授予归属部门可读；传 [] 表示空授权（仅超管与管辖部门管理员可读）。
     visibility_grants: list[VisibilityGrantRequest] | None = None
 
 

@@ -16,8 +16,11 @@ class VisibilityGrantRequest(BaseModel):
 
     model_config = ConfigDict(extra="forbid", strict=True)
 
+    # 授权对象类型：department（按部门）或 role（按角色，仅 super_admin 可配置）。
     target_type: Literal["department", "role"]
+    # 授权目标 ID：department 填活跃部门 ID；role 填角色值（super_admin / dept_admin / member）。
     target_id: str = Field(min_length=1, max_length=64)
+    # 是否包含子部门（默认 True，仅 department 生效；role 授权会被统一规范为 False）。
     include_subdepartments: bool = True
 
     def to_domain(self) -> VisibilityGrantInput:

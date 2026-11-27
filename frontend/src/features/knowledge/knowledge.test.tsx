@@ -489,11 +489,18 @@ describe("知识库目录", () => {
     await screen.findByRole("heading", { level: 1, name: "知识库" });
     await user.click(screen.getByRole("button", { name: "新建知识库" }));
     const deptDialog = screen.getByRole("dialog", { name: "新建知识库" });
-    const scopeSelect = within(deptDialog).getByLabelText("可见范围");
-    expect(within(scopeSelect).queryByText("全公司")).not.toBeInTheDocument();
-    await user.selectOptions(scopeSelect, "department");
+    const scopeSelect = within(deptDialog).getByRole("combobox", {
+      name: "可见范围",
+    });
+    await user.click(scopeSelect);
+    expect(
+      screen.queryByRole("option", { name: "全公司" }),
+    ).not.toBeInTheDocument();
+    await user.click(screen.getByRole("option", { name: "部门共享" }));
     // 唯一管辖部门「财务部」应自动预选。
-    expect(within(deptDialog).getByLabelText("归属部门")).toHaveValue("dept-fin");
+    expect(
+      within(deptDialog).getByRole("combobox", { name: "归属部门" }),
+    ).toHaveTextContent("财务部");
     await user.type(within(deptDialog).getByLabelText("知识库名称"), "财务制度库");
     await user.click(within(deptDialog).getByRole("button", { name: "创建知识库" }));
 
@@ -555,10 +562,10 @@ describe("知识库目录", () => {
       screen.getByRole("button", { name: "编辑知识库：财务制度库" }),
     );
     const editDialog2 = screen.getByRole("dialog", { name: "编辑知识库" });
-    await user.selectOptions(
-      within(editDialog2).getByLabelText("可见范围"),
-      "company",
+    await user.click(
+      within(editDialog2).getByRole("combobox", { name: "可见范围" }),
     );
+    await user.click(screen.getByRole("option", { name: "全公司" }));
     await user.click(
       within(editDialog2).getByRole("button", { name: "保存知识库" }),
     );
@@ -687,38 +694,38 @@ describe("知识库目录", () => {
       within(dialog).getByLabelText("知识库名称"),
       "跨部门财务制度库",
     );
-    await user.selectOptions(
-      within(dialog).getByLabelText("可见范围"),
-      "department",
+    await user.click(
+      within(dialog).getByRole("combobox", { name: "可见范围" }),
     );
-    const ownerSelect = await within(dialog).findByLabelText("归属部门");
-    await waitFor(() =>
-      expect(within(ownerSelect).getByText("财务部")).toBeInTheDocument(),
-    );
-    await user.selectOptions(ownerSelect, "dept-fin");
+    await user.click(screen.getByRole("option", { name: "部门共享" }));
+    const ownerSelect = await within(dialog).findByRole("combobox", {
+      name: "归属部门",
+    });
+    await user.click(ownerSelect);
+    await user.click(await screen.findByRole("option", { name: "财务部" }));
 
     // 确认 VisibilityGrantsEditor 渲染并复用同一份企业活跃部门目录（仅 1 次查询）。
     const grantsEditor = within(dialog).getByTestId("visibility-grants-editor");
     expect(orgDeptCalls).toBe(1);
 
     // 追加跨部门「研发部」（默认含子部门 true）。
-    await user.selectOptions(
-      within(grantsEditor).getByLabelText("选择附加共享部门"),
-      "dept-rd",
+    await user.click(
+      within(grantsEditor).getByRole("combobox", { name: "选择附加共享部门" }),
     );
+    await user.click(screen.getByRole("option", { name: "研发部" }));
     await user.click(
       within(grantsEditor).getByRole("button", { name: "添加共享" }),
     );
 
     // 切至角色授权，追加「部门管理员」（role 项 include_subdepartments 恒为 false）。
-    await user.selectOptions(
-      within(grantsEditor).getByLabelText("附加授权类型"),
-      "role",
+    await user.click(
+      within(grantsEditor).getByRole("combobox", { name: "附加授权类型" }),
     );
-    await user.selectOptions(
-      within(grantsEditor).getByLabelText("选择附加共享角色"),
-      "dept_admin",
+    await user.click(screen.getByRole("option", { name: "指定角色" }));
+    await user.click(
+      within(grantsEditor).getByRole("combobox", { name: "选择附加共享角色" }),
     );
+    await user.click(screen.getByRole("option", { name: "部门管理员" }));
     await user.click(
       within(grantsEditor).getByRole("button", { name: "添加共享" }),
     );
@@ -860,14 +867,14 @@ describe("知识库目录", () => {
       within(createDialog1).getByLabelText("知识库名称"),
       "默认归属财务库",
     );
-    await user.selectOptions(
-      within(createDialog1).getByLabelText("可见范围"),
-      "department",
+    await user.click(
+      within(createDialog1).getByRole("combobox", { name: "可见范围" }),
     );
-    await user.selectOptions(
-      within(createDialog1).getByLabelText("归属部门"),
-      "dept-fin",
+    await user.click(screen.getByRole("option", { name: "部门共享" }));
+    await user.click(
+      within(createDialog1).getByRole("combobox", { name: "归属部门" }),
     );
+    await user.click(screen.getByRole("option", { name: "财务部" }));
     const grantsEditor1 = within(createDialog1).getByTestId(
       "visibility-grants-editor",
     );
@@ -900,21 +907,21 @@ describe("知识库目录", () => {
       within(createDialog2).getByLabelText("知识库名称"),
       "财务内审联合库",
     );
-    await user.selectOptions(
-      within(createDialog2).getByLabelText("可见范围"),
-      "department",
+    await user.click(
+      within(createDialog2).getByRole("combobox", { name: "可见范围" }),
     );
-    await user.selectOptions(
-      within(createDialog2).getByLabelText("归属部门"),
-      "dept-fin",
+    await user.click(screen.getByRole("option", { name: "部门共享" }));
+    await user.click(
+      within(createDialog2).getByRole("combobox", { name: "归属部门" }),
     );
+    await user.click(screen.getByRole("option", { name: "财务部" }));
     const grantsEditor2 = within(createDialog2).getByTestId(
       "visibility-grants-editor",
     );
-    await user.selectOptions(
-      within(grantsEditor2).getByLabelText("选择附加共享部门"),
-      "dept-audit",
+    await user.click(
+      within(grantsEditor2).getByRole("combobox", { name: "选择附加共享部门" }),
     );
+    await user.click(screen.getByRole("option", { name: "内审部" }));
     await user.click(
       within(grantsEditor2).getByRole("button", { name: "添加共享" }),
     );
@@ -947,10 +954,10 @@ describe("知识库目录", () => {
       screen.getByRole("button", { name: "编辑知识库：财务制度基线库" }),
     );
     const editDialog = screen.getByRole("dialog", { name: "编辑知识库" });
-    await user.selectOptions(
-      within(editDialog).getByLabelText("归属部门"),
-      "dept-audit",
+    await user.click(
+      within(editDialog).getByRole("combobox", { name: "归属部门" }),
     );
+    await user.click(screen.getByRole("option", { name: "内审部" }));
     await user.click(
       within(editDialog).getByRole("button", { name: "保存知识库" }),
     );
@@ -969,10 +976,12 @@ describe("知识库目录", () => {
     const editGrantsEditor = within(editDialog2).getByTestId(
       "visibility-grants-editor",
     );
-    await user.selectOptions(
-      within(editGrantsEditor).getByLabelText("选择附加共享部门"),
-      "dept-audit",
+    await user.click(
+      within(editGrantsEditor).getByRole("combobox", {
+        name: "选择附加共享部门",
+      }),
     );
+    await user.click(screen.getByRole("option", { name: "内审部" }));
     await user.click(
       within(editGrantsEditor).getByRole("button", { name: "添加共享" }),
     );
@@ -1162,14 +1171,14 @@ describe("知识库目录", () => {
     const grantsEditor1 = within(editDialog1).getByTestId(
       "visibility-grants-editor",
     );
-    await user.selectOptions(
-      within(grantsEditor1).getByLabelText("附加授权类型"),
-      "role",
+    await user.click(
+      within(grantsEditor1).getByRole("combobox", { name: "附加授权类型" }),
     );
-    await user.selectOptions(
-      within(grantsEditor1).getByLabelText("选择附加共享角色"),
-      "member",
+    await user.click(screen.getByRole("option", { name: "指定角色" }));
+    await user.click(
+      within(grantsEditor1).getByRole("combobox", { name: "选择附加共享角色" }),
     );
+    await user.click(screen.getByRole("option", { name: "员工" }));
     await user.click(
       within(grantsEditor1).getByRole("button", { name: "添加共享" }),
     );
@@ -1219,10 +1228,10 @@ describe("知识库目录", () => {
 
     // 3. 将范围切为 personal 并保存 -> 严禁携带 owner_department_id 与 visibility_grants。
     shouldForbidNextPatch = false;
-    await user.selectOptions(
-      within(editDialog2).getByLabelText("可见范围"),
-      "personal",
+    await user.click(
+      within(editDialog2).getByRole("combobox", { name: "可见范围" }),
     );
+    await user.click(screen.getByRole("option", { name: "个人" }));
     await user.click(
       within(editDialog2).getByRole("button", { name: "保存知识库" }),
     );
@@ -1319,10 +1328,9 @@ describe("知识库目录", () => {
       screen.getByRole("button", { name: "编辑知识库：财务研发联合制度库" }),
     );
     const editDialog = screen.getByRole("dialog", { name: "编辑知识库" });
-    const ownerSelect = await within(editDialog).findByLabelText("归属部门");
-    await waitFor(() =>
-      expect(within(ownerSelect).getByText("研发部")).toBeInTheDocument(),
-    );
+    const ownerSelect = await within(editDialog).findByRole("combobox", {
+      name: "归属部门",
+    });
 
     // 初始包含附加部门「研发部」。
     expect(
@@ -1330,8 +1338,10 @@ describe("知识库目录", () => {
     ).toBeInTheDocument();
 
     // 先将归属部门临时切到「研发部」，再切回原归属部门「财务部」。
-    await user.selectOptions(ownerSelect, "dept-rd");
-    await user.selectOptions(ownerSelect, "dept-fin");
+    await user.click(ownerSelect);
+    await user.click(await screen.findByRole("option", { name: "研发部" }));
+    await user.click(ownerSelect);
+    await user.click(screen.getByRole("option", { name: "财务部" }));
 
     // 回归断言：原附加授权「研发部」必须完整保留，且直接点击保存只关闭弹窗而不发 PATCH。
     const grantsEditor = within(editDialog).getByTestId(

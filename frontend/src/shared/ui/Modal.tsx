@@ -209,9 +209,9 @@ export function Modal({
             event.preventDefault();
             return;
           }
-          // 兼容声明自管 Escape 的嵌套控件（如展开中的 Select 触发器），让其优先消费按键。
+          // 兼容声明自管 Escape 的嵌套控件及任意展开中的 Select 触发器，让其优先消费首次 Escape 而不误关外层弹窗。
           const escapeOwner = (event.target as Element | null)?.closest?.(
-            "[data-modal-escape-owner]",
+            '[data-modal-escape-owner], [role="combobox"][aria-expanded="true"]',
           );
           if (escapeOwner) {
             event.preventDefault();

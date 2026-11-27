@@ -3,7 +3,11 @@ import { useEffect, useMemo } from "react";
 import {
   FIELD_CLASS,
   FIELD_INPUT_CLASS,
-  FIELD_SELECT_CLASS,
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
   VisibilityBadge,
   type VisibilityScope,
 } from "../../shared/ui";
@@ -145,24 +149,24 @@ export function KnowledgeVisibilityFields({
 
   return (
     <>
-      <label className={FIELD_CLASS} htmlFor={scopeSelectId}>
-        <span>可见范围</span>
-        <select
-          aria-label="可见范围"
-          className={FIELD_SELECT_CLASS}
+      <div className={FIELD_CLASS}>
+        <label htmlFor={scopeSelectId}>可见范围</label>
+        <Select
           disabled={disabled}
-          id={scopeSelectId}
-          onChange={(event) =>
-            onScopeChange(event.target.value as VisibilityScope)
-          }
+          onValueChange={(value) => onScopeChange(value as VisibilityScope)}
           value={scope}
         >
-          {allowedScopes.map((option) => (
-            <option key={option} value={option}>
-              {scopeOptionLabel(option)}
-            </option>
-          ))}
-        </select>
+          <SelectTrigger aria-label="可见范围" id={scopeSelectId}>
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            {allowedScopes.map((option) => (
+              <SelectItem key={option} value={option}>
+                {scopeOptionLabel(option)}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
         <small>
           {scope === "company"
             ? "全公司活跃员工均可检索，仅超级管理员可维护。"
@@ -170,7 +174,7 @@ export function KnowledgeVisibilityFields({
               ? "默认向归属部门成员开放，支持按需追加跨部门或按角色只读共享；归属部门管理员与超管可维护。"
               : "仅本人可见、检索与维护。"}
         </small>
-      </label>
+      </div>
 
       {scope === "department" ? (
         <div className={FIELD_CLASS}>
@@ -189,23 +193,27 @@ export function KnowledgeVisibilityFields({
               当前账号未分配可管辖部门，无法创建或修改部门共享知识库。
             </p>
           ) : deptAdmin ? (
-            <select
-              aria-describedby={departmentError ? deptErrorId : undefined}
-              aria-invalid={departmentError ? true : undefined}
-              aria-label="归属部门"
-              className={FIELD_SELECT_CLASS}
+            <Select
               disabled={disabled}
-              id={deptSelectId}
-              onChange={(event) => onDepartmentChange(event.target.value)}
+              onValueChange={onDepartmentChange}
               value={departmentId}
             >
-              <option value="">请选择归属部门</option>
-              {managedDeptOptions.map((dept) => (
-                <option key={dept.id} value={dept.id}>
-                  {dept.name}
-                </option>
-              ))}
-            </select>
+              <SelectTrigger
+                aria-describedby={departmentError ? deptErrorId : undefined}
+                aria-label="归属部门"
+                error={Boolean(departmentError)}
+                id={deptSelectId}
+              >
+                <SelectValue placeholder="请选择归属部门" />
+              </SelectTrigger>
+              <SelectContent>
+                {managedDeptOptions.map((dept) => (
+                  <SelectItem key={dept.id} value={dept.id}>
+                    {dept.name}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
           ) : orgDepartmentsLoading ? (
             <small role="status">正在加载企业活跃部门列表…</small>
           ) : orgDepartmentsError ? (
@@ -225,27 +233,32 @@ export function KnowledgeVisibilityFields({
               <small>部门目录暂不可用，已降级为手动输入部门 ID。</small>
             </>
           ) : (
-            <select
-              aria-describedby={departmentError ? deptErrorId : undefined}
-              aria-invalid={departmentError ? true : undefined}
-              aria-label="归属部门"
-              className={FIELD_SELECT_CLASS}
+            <Select
               disabled={disabled}
-              id={deptSelectId}
-              onChange={(event) => onDepartmentChange(event.target.value)}
+              onValueChange={onDepartmentChange}
               value={departmentId}
             >
-              <option value="">请选择归属部门</option>
-              {orgDepartments.map((dept) => (
-                <option key={dept.id} value={dept.id}>
-                  {dept.name}
-                </option>
-              ))}
-              {departmentId &&
-              !orgDepartments.some((dept) => dept.id === departmentId) ? (
-                <option value={departmentId}>{departmentId}</option>
-              ) : null}
-            </select>
+              <SelectTrigger
+                aria-describedby={departmentError ? deptErrorId : undefined}
+                aria-label="归属部门"
+                error={Boolean(departmentError)}
+                id={deptSelectId}
+              >
+                <SelectValue placeholder="请选择归属部门" />
+              </SelectTrigger>
+              <SelectContent>
+                {orgDepartments.map((dept) => (
+                  <SelectItem key={dept.id} value={dept.id}>
+                    {dept.name}
+                  </SelectItem>
+                ))}
+                {/* 编辑历史数据时若当前部门已不在活跃目录中，保留兜底选项以保持回显正确。 */}
+                {departmentId &&
+                !orgDepartments.some((dept) => dept.id === departmentId) ? (
+                  <SelectItem value={departmentId}>{departmentId}</SelectItem>
+                ) : null}
+              </SelectContent>
+            </Select>
           )}
 
           {!noManagedDepartments && departmentError ? (

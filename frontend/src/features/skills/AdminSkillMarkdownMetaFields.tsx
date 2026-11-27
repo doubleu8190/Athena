@@ -3,6 +3,11 @@ import { useId, type RefObject } from "react";
 import {
   InlineAlert,
   Input,
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
   Switch,
   VisibilityBadge,
   cn,
@@ -307,21 +312,21 @@ export function AdminSkillMarkdownMetaFields({
                   >
                     发布范围
                   </label>
-                  <select
-                    aria-label="发布范围"
-                    className="h-9 w-full rounded-lg border border-border-default bg-canvas px-3 text-sm text-text-primary shadow-xs focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring-focus disabled:cursor-not-allowed disabled:opacity-60"
+                  <Select
                     disabled={busy}
-                    id={scopeId}
-                    onChange={(event) =>
-                      onScopeChange(
-                        event.target.value as "company" | "department",
-                      )
+                    onValueChange={(value) =>
+                      onScopeChange(value as "company" | "department")
                     }
                     value={scope}
                   >
-                    <option value="company">全公司</option>
-                    <option value="department">部门共享</option>
-                  </select>
+                    <SelectTrigger aria-label="发布范围" id={scopeId}>
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="company">全公司</SelectItem>
+                      <SelectItem value="department">部门共享</SelectItem>
+                    </SelectContent>
+                  </Select>
                 </>
               )}
             </div>
@@ -378,36 +383,31 @@ export function AdminSkillMarkdownMetaFields({
                     </p>
                   </div>
                 ) : (
-                  <select
-                    aria-describedby={
-                      fieldErrors.ownerDepartmentId
-                        ? departmentErrorId
-                        : undefined
-                    }
-                    aria-invalid={
-                      fieldErrors.ownerDepartmentId ? true : undefined
-                    }
-                    aria-label="归属部门"
-                    className={cn(
-                      "h-9 w-full rounded-lg border bg-canvas px-3 text-sm text-text-primary shadow-xs focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring-focus disabled:cursor-not-allowed disabled:opacity-60",
-                      fieldErrors.ownerDepartmentId
-                        ? "border-danger"
-                        : "border-border-default",
-                    )}
+                  <Select
                     disabled={busy}
-                    id={departmentIdInput}
-                    onChange={(event) =>
-                      onOwnerDepartmentChange(event.target.value)
-                    }
+                    onValueChange={(value) => onOwnerDepartmentChange(value)}
                     value={ownerDepartmentId}
                   >
-                    <option value="">请选择归属部门</option>
-                    {departmentSelectOptions.map((dept) => (
-                      <option key={dept.id} value={dept.id}>
-                        {dept.name}
-                      </option>
-                    ))}
-                  </select>
+                    <SelectTrigger
+                      aria-describedby={
+                        fieldErrors.ownerDepartmentId
+                          ? departmentErrorId
+                          : undefined
+                      }
+                      aria-label="归属部门"
+                      error={Boolean(fieldErrors.ownerDepartmentId)}
+                      id={departmentIdInput}
+                    >
+                      <SelectValue placeholder="请选择归属部门" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {departmentSelectOptions.map((dept) => (
+                        <SelectItem key={dept.id} value={dept.id}>
+                          {dept.name}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
                 )}
 
                 {fieldErrors.ownerDepartmentId ? (

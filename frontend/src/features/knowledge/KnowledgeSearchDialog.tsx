@@ -2,13 +2,17 @@ import { useEffect, useId, useState } from "react";
 
 import {
   Button,
-  COMPACT_SELECT_CLASS,
   FIELD_CLASS,
   FIELD_TEXTAREA_CLASS,
   InlineAlert,
   MODAL_WIDTH_XL,
   NOTICE_BRAND_CLASS,
   NOTICE_WARNING_CLASS,
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
   TEXT_BUTTON_CLASS,
 } from "../../shared/ui";
 import { EmptyState } from "../../shared/ui/EmptyState";
@@ -215,24 +219,29 @@ export function KnowledgeSearchDialog({
           <small>最多 4,000 个字符。</small>
         </label>
         <div className="flex flex-col items-stretch justify-between gap-[15px] min-[701px]:flex-row min-[701px]:items-end max-[700px]:[&>button]:w-full">
-          <label
-            className="flex items-center justify-between gap-2 text-xs text-text-secondary min-[701px]:justify-start"
-            htmlFor={`${formId}-limit`}
-          >
-            <span>结果数量</span>
-            <select
-              className={COMPACT_SELECT_CLASS}
-              id={`${formId}-limit`}
-              onChange={(event) => setLimit(Number(event.target.value))}
-              value={limit}
+          <div className="flex items-center justify-between gap-2 text-xs text-text-secondary min-[701px]:justify-start">
+            <label htmlFor={`${formId}-limit`}>结果数量</label>
+            <Select
+              disabled={search.isPending}
+              onValueChange={(nextValue) => setLimit(Number(nextValue))}
+              value={String(limit)}
             >
-              {SEARCH_LIMIT_OPTIONS.map((value) => (
-                <option key={value} value={value}>
-                  {value}
-                </option>
-              ))}
-            </select>
-          </label>
+              <SelectTrigger
+                aria-label="结果数量"
+                className="h-9 w-auto min-w-[76px]"
+                id={`${formId}-limit`}
+              >
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                {SEARCH_LIMIT_OPTIONS.map((value) => (
+                  <SelectItem key={value} value={String(value)}>
+                    {value}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
           <Button
             disabled={search.isPending}
             type="submit"

@@ -420,6 +420,65 @@ describe("Modal", () => {
     await waitFor(() => expect(openButton).toHaveFocus());
   });
 
+  it("未手动传 data-modal-escape-owner 时，展开态 combobox 触发器按 Escape 也不关闭外层弹窗", async () => {
+    const user = userEvent.setup();
+
+    function UnmarkedComboboxModalHarness() {
+      const [open, setOpen] = useState(false);
+      const [expanded, setExpanded] = useState(false);
+      return (
+        <>
+          <button onClick={() => setOpen(true)} type="button">
+            打开触发器弹窗
+          </button>
+          <Modal
+            onClose={() => setOpen(false)}
+            open={open}
+            title="触发器兼容弹窗"
+          >
+            <button
+              aria-expanded={expanded}
+              aria-label="未加标记的下拉触发器"
+              onClick={() => setExpanded((prev) => !prev)}
+              onKeyDown={(event) => {
+                if (event.key === "Escape" && expanded) {
+                  setExpanded(false);
+                }
+              }}
+              role="combobox"
+              type="button"
+            >
+              选择项
+            </button>
+          </Modal>
+        </>
+      );
+    }
+
+    render(<UnmarkedComboboxModalHarness />);
+    const openButton = screen.getByRole("button", { name: "打开触发器弹窗" });
+    await user.click(openButton);
+    const dialog = screen.getByRole("dialog", { name: "触发器兼容弹窗" });
+    const combobox = within(dialog).getByRole("combobox", {
+      name: "未加标记的下拉触发器",
+    });
+
+    await user.click(combobox);
+    expect(combobox).toHaveAttribute("aria-expanded", "true");
+
+    // 触发器处于展开态且未标记 data-modal-escape-owner，首次 Escape 仅收起触发器。
+    await user.keyboard("{Escape}");
+    expect(combobox).toHaveAttribute("aria-expanded", "false");
+    expect(dialog).toBeInTheDocument();
+
+    // 触发器收起后再次 Escape 才关闭外层 Modal。
+    await user.keyboard("{Escape}");
+    expect(
+      screen.queryByRole("dialog", { name: "触发器兼容弹窗" }),
+    ).not.toBeInTheDocument();
+    await waitFor(() => expect(openButton).toHaveFocus());
+  });
+
   it("嵌套弹窗在同一 commit 中同时以 open={true} 挂载时，内层始终为栈顶且可经关闭按钮与 Escape 正常关闭", async () => {
     const user = userEvent.setup();
 

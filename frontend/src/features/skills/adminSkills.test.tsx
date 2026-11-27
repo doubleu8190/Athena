@@ -1203,9 +1203,9 @@ describe("管理员技能管理", () => {
     expect(
       within(importDialog).queryByLabelText("发布范围"),
     ).not.toBeInTheDocument();
-    expect(within(importDialog).getByLabelText("归属部门")).toHaveValue(
-      "dept-fin",
-    );
+    expect(
+      within(importDialog).getByRole("combobox", { name: "归属部门" }),
+    ).toHaveTextContent("财务部");
     await user.upload(
       within(importDialog).getByLabelText("技能 ZIP"),
       new File(["zip"], "fin.zip", { type: "application/zip" }),

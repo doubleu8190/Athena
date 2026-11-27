@@ -5,11 +5,15 @@ import {
   Button,
   FIELD_CLASS,
   FIELD_INPUT_CLASS,
-  FIELD_SELECT_CLASS,
   FORM_STACK_CLASS,
   InlineAlert,
   MODAL_WIDTH_LG,
   NOTICE_WARNING_CLASS,
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
   VisibilityBadge,
 } from "../../shared/ui";
 import { Modal } from "../../shared/ui/Modal";
@@ -217,32 +221,32 @@ export function SkillPackageDialog({
             </div>
           </div>
         ) : (
-          <label className={FIELD_CLASS} htmlFor={scopeId}>
-            <span>发布范围</span>
-            <select
-              aria-label="发布范围"
-              className={FIELD_SELECT_CLASS}
+          <div className={FIELD_CLASS}>
+            <label htmlFor={scopeId}>发布范围</label>
+            <Select
               disabled={mutation.isPending}
-              id={scopeId}
-              onChange={(event) => {
-                const nextScope = event.target.value as
-                  | "company"
-                  | "department";
+              onValueChange={(value) => {
+                const nextScope = value as "company" | "department";
                 setScope(nextScope);
                 setDepartmentError(null);
                 requestIdRef.current = null;
               }}
               value={scope}
             >
-              <option value="company">全公司</option>
-              <option value="department">部门共享</option>
-            </select>
+              <SelectTrigger aria-label="发布范围" id={scopeId}>
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="company">全公司</SelectItem>
+                <SelectItem value="department">部门共享</SelectItem>
+              </SelectContent>
+            </Select>
             <small>
               {scope === "company"
                 ? "全公司活跃员工可用，仅支持启停不可删除。"
                 : "归属部门及子部门成员可用，支持按需软删除。"}
             </small>
-          </label>
+          </div>
         )}
 
         {scope === "department" ? (
@@ -259,27 +263,31 @@ export function SkillPackageDialog({
                 variant="warning"
               />
             ) : deptAdmin ? (
-              <select
-                aria-describedby={departmentError ? deptErrorId : undefined}
-                aria-invalid={departmentError ? true : undefined}
-                aria-label="归属部门"
-                className={FIELD_SELECT_CLASS}
+              <Select
                 disabled={mutation.isPending}
-                id={departmentIdInput}
-                onChange={(event) => {
-                  setOwnerDepartmentId(event.target.value);
+                onValueChange={(value) => {
+                  setOwnerDepartmentId(value);
                   setDepartmentError(null);
                   requestIdRef.current = null;
                 }}
                 value={ownerDepartmentId}
               >
-                <option value="">请选择归属部门</option>
-                {managedDeptOptions.map((dept) => (
-                  <option key={dept.id} value={dept.id}>
-                    {dept.name}
-                  </option>
-                ))}
-              </select>
+                <SelectTrigger
+                  aria-describedby={departmentError ? deptErrorId : undefined}
+                  aria-label="归属部门"
+                  error={Boolean(departmentError)}
+                  id={departmentIdInput}
+                >
+                  <SelectValue placeholder="请选择归属部门" />
+                </SelectTrigger>
+                <SelectContent>
+                  {managedDeptOptions.map((dept) => (
+                    <SelectItem key={dept.id} value={dept.id}>
+                      {dept.name}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
             ) : orgDepartments.isPending ? (
               <small role="status">正在加载企业活跃部门列表…</small>
             ) : orgDepartments.isError ? (
@@ -303,27 +311,31 @@ export function SkillPackageDialog({
                 <small>部门目录暂不可用，已降级为手动输入部门 ID。</small>
               </>
             ) : (
-              <select
-                aria-describedby={departmentError ? deptErrorId : undefined}
-                aria-invalid={departmentError ? true : undefined}
-                aria-label="归属部门"
-                className={FIELD_SELECT_CLASS}
+              <Select
                 disabled={mutation.isPending}
-                id={departmentIdInput}
-                onChange={(event) => {
-                  setOwnerDepartmentId(event.target.value);
+                onValueChange={(value) => {
+                  setOwnerDepartmentId(value);
                   setDepartmentError(null);
                   requestIdRef.current = null;
                 }}
                 value={ownerDepartmentId}
               >
-                <option value="">请选择归属部门</option>
-                {activeOrgDepartments.map((dept) => (
-                  <option key={dept.id} value={dept.id}>
-                    {dept.name}
-                  </option>
-                ))}
-              </select>
+                <SelectTrigger
+                  aria-describedby={departmentError ? deptErrorId : undefined}
+                  aria-label="归属部门"
+                  error={Boolean(departmentError)}
+                  id={departmentIdInput}
+                >
+                  <SelectValue placeholder="请选择归属部门" />
+                </SelectTrigger>
+                <SelectContent>
+                  {activeOrgDepartments.map((dept) => (
+                    <SelectItem key={dept.id} value={dept.id}>
+                      {dept.name}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
             )}
             {departmentError ? (
               <p className="field-error" id={deptErrorId} role="alert">

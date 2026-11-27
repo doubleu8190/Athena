@@ -265,35 +265,40 @@ describe("管理端公共/部门技能双形态与在线 Markdown 发布", () =>
     );
 
     // 切换发布范围为部门共享并选择财务部
-    await user.selectOptions(
-      within(createDialog).getByLabelText("发布范围"),
-      "department",
+    await user.click(
+      within(createDialog).getByRole("combobox", { name: "发布范围" }),
     );
-    const ownerSelect = await within(createDialog).findByLabelText("归属部门");
-    expect(within(ownerSelect).queryByText("已归档旧部")).not.toBeInTheDocument();
-    await user.selectOptions(ownerSelect, "dept-fin");
+    await user.click(screen.getByRole("option", { name: "部门共享" }));
+    const ownerSelect = await within(createDialog).findByRole("combobox", {
+      name: "归属部门",
+    });
+    await user.click(ownerSelect);
+    expect(
+      screen.queryByRole("option", { name: "已归档旧部" }),
+    ).not.toBeInTheDocument();
+    await user.click(screen.getByRole("option", { name: "财务部" }));
 
     // VisibilityGrantsEditor：追加运营部（含子部门）与员工角色（include_subdepartments 恒为 false）
     const grantsEditor = within(createDialog).getByTestId(
       "visibility-grants-editor",
     );
-    await user.selectOptions(
-      within(grantsEditor).getByLabelText("选择附加共享部门"),
-      "dept-ops",
+    await user.click(
+      within(grantsEditor).getByRole("combobox", { name: "选择附加共享部门" }),
     );
+    await user.click(screen.getByRole("option", { name: "运营部" }));
     await user.click(
       within(grantsEditor).getByRole("button", { name: "添加共享" }),
     );
     expect(within(grantsEditor).getByText("运营部")).toBeInTheDocument();
 
-    await user.selectOptions(
-      within(grantsEditor).getByLabelText("附加授权类型"),
-      "role",
+    await user.click(
+      within(grantsEditor).getByRole("combobox", { name: "附加授权类型" }),
     );
-    await user.selectOptions(
-      within(grantsEditor).getByLabelText("选择附加共享角色"),
-      "member",
+    await user.click(screen.getByRole("option", { name: "指定角色" }));
+    await user.click(
+      within(grantsEditor).getByRole("combobox", { name: "选择附加共享角色" }),
     );
+    await user.click(screen.getByRole("option", { name: "员工" }));
     await user.click(
       within(grantsEditor).getByRole("button", { name: "添加共享" }),
     );
@@ -454,10 +459,10 @@ describe("管理端公共/部门技能双形态与在线 Markdown 发布", () =>
     expect(
       within(defaultDialog).queryByLabelText("发布范围"),
     ).not.toBeInTheDocument();
-    await user.selectOptions(
-      within(defaultDialog).getByLabelText("归属部门"),
-      "dept-fin",
+    await user.click(
+      within(defaultDialog).getByRole("combobox", { name: "归属部门" }),
     );
+    await user.click(screen.getByRole("option", { name: "财务部" }));
     const defaultGrantsEditor = within(defaultDialog).getByTestId(
       "visibility-grants-editor",
     );
@@ -502,7 +507,10 @@ describe("管理端公共/部门技能双形态与在线 Markdown 发布", () =>
     const dialog = await screen.findByRole("dialog", {
       name: /新建在线模板技能/,
     });
-    await user.selectOptions(within(dialog).getByLabelText("归属部门"), "dept-fin");
+    await user.click(
+      within(dialog).getByRole("combobox", { name: "归属部门" }),
+    );
+    await user.click(screen.getByRole("option", { name: "财务部" }));
 
     const grantsEditor = within(dialog).getByTestId("visibility-grants-editor");
     // 绝不暴露角色授权类型选择器，防止误触 403 visibility_grant_forbidden
@@ -513,10 +521,12 @@ describe("管理端公共/部门技能双形态与在线 Markdown 发布", () =>
       within(grantsEditor).queryByLabelText("选择附加共享角色"),
     ).not.toBeInTheDocument();
     // 仅能追加本人另一管辖部门「内审部」
-    const extraDeptSelect =
-      within(grantsEditor).getByLabelText("选择附加共享部门");
-    expect(within(extraDeptSelect).getByText("内审部")).toBeInTheDocument();
-    await user.selectOptions(extraDeptSelect, "dept-audit");
+    const extraDeptSelect = within(grantsEditor).getByRole("combobox", {
+      name: "选择附加共享部门",
+    });
+    await user.click(extraDeptSelect);
+    expect(screen.getByRole("option", { name: "内审部" })).toBeInTheDocument();
+    await user.click(screen.getByRole("option", { name: "内审部" }));
     await user.click(
       within(grantsEditor).getByRole("button", { name: "添加共享" }),
     );

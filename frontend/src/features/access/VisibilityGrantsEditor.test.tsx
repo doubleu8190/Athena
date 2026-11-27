@@ -288,13 +288,16 @@ describe("VisibilityGrantsEditor", () => {
       within(editor).queryByLabelText("选择附加共享角色"),
     ).not.toBeInTheDocument();
 
-    const extraDeptSelect = within(editor).getByLabelText("选择附加共享部门");
-    expect(within(extraDeptSelect).getByText("内审部")).toBeInTheDocument();
+    const extraDeptSelect = within(editor).getByRole("combobox", {
+      name: "选择附加共享部门",
+    });
+    await user.click(extraDeptSelect);
+    expect(screen.getByRole("option", { name: "内审部" })).toBeInTheDocument();
     expect(
-      within(extraDeptSelect).queryByText("运营部"),
+      screen.queryByRole("option", { name: "运营部" }),
     ).not.toBeInTheDocument();
 
-    await user.selectOptions(extraDeptSelect, "dept-audit");
+    await user.click(screen.getByRole("option", { name: "内审部" }));
     await user.click(within(editor).getByRole("button", { name: "添加共享" }));
 
     const synced = JSON.parse(
@@ -310,6 +313,59 @@ describe("VisibilityGrantsEditor", () => {
         include_subdepartments: false,
         target_id: "dept-audit",
         target_type: "department",
+      },
+    ]);
+  });
+
+  it("super_admin 可通过共享 Select 切换授权类型并添加附加部门与角色授权", async () => {
+    stubAuthAndDepartments(TEST_ADMIN);
+    const user = userEvent.setup();
+
+    renderWithAuth(
+      <Harness
+        departments={ACTIVE_DEPARTMENTS}
+        initialGrants={[defaultOwnerGrant("dept-fin", true)]}
+        initialOwnerId="dept-fin"
+      />,
+    );
+
+    const editor = await screen.findByTestId("visibility-grants-editor");
+
+    await user.click(
+      within(editor).getByRole("combobox", { name: "选择附加共享部门" }),
+    );
+    await user.click(screen.getByRole("option", { name: "运营部" }));
+    await user.click(within(editor).getByRole("button", { name: "添加共享" }));
+
+    await user.click(
+      within(editor).getByRole("combobox", { name: "附加授权类型" }),
+    );
+    await user.click(screen.getByRole("option", { name: "指定角色" }));
+
+    await user.click(
+      within(editor).getByRole("combobox", { name: "选择附加共享角色" }),
+    );
+    await user.click(screen.getByRole("option", { name: "员工" }));
+    await user.click(within(editor).getByRole("button", { name: "添加共享" }));
+
+    const synced = JSON.parse(
+      screen.getByTestId("grants-json").textContent ?? "[]",
+    ) as VisibilityGrantInput[];
+    expect(synced).toEqual([
+      {
+        include_subdepartments: true,
+        target_id: "dept-fin",
+        target_type: "department",
+      },
+      {
+        include_subdepartments: true,
+        target_id: "dept-ops",
+        target_type: "department",
+      },
+      {
+        include_subdepartments: false,
+        target_id: "member",
+        target_type: "role",
       },
     ]);
   });

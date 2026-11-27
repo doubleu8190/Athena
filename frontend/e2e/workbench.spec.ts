@@ -1955,15 +1955,17 @@ test.describe("Athena v2 第三期多模态、技能双形态与知识库共享�
     await createDialog
       .getByLabel("技能简介")
       .fill("依据公司差旅与费用制度逐项核查报销单据合规性");
-    await createDialog.getByLabel("归属部门").selectOption("dept-finance");
+    await createDialog.getByRole("combobox", { name: "归属部门" }).click();
+    await page.getByRole("option", { name: "财务分析部" }).click();
 
     // 部门管理员仅可追加自身管辖部门，不渲染角色授权入口。
     const grantsEditor = createDialog.getByTestId("visibility-grants-editor");
     await expect(grantsEditor).toBeVisible();
     await expect(grantsEditor.getByLabel("附加授权类型")).toHaveCount(0);
     await grantsEditor
-      .getByLabel("选择附加共享部门")
-      .selectOption("dept-audit");
+      .getByRole("combobox", { name: "选择附加共享部门" })
+      .click();
+    await page.getByRole("option", { name: "预算审计部" }).click();
     await grantsEditor.getByRole("button", { name: "添加共享" }).click();
 
     await createDialog
@@ -2070,18 +2072,25 @@ test.describe("Athena v2 第三期多模态、技能双形态与知识库共享�
     await expect(createDialog).toBeVisible();
 
     await createDialog.getByLabel("知识库名称").fill("跨部门合规知识库");
-    await createDialog.getByLabel("可见范围").selectOption("department");
-    await createDialog.getByLabel("归属部门").selectOption("dept-finance");
+    await createDialog.getByRole("combobox", { name: "可见范围" }).click();
+    await page.getByRole("option", { name: "部门共享" }).click();
+    await createDialog.getByRole("combobox", { name: "归属部门" }).click();
+    await page.getByRole("option", { name: "财务分析部" }).click();
 
     const grantsEditor = createDialog.getByTestId("visibility-grants-editor");
     await expect(grantsEditor).toBeVisible();
     await grantsEditor
-      .getByLabel("选择附加共享部门")
-      .selectOption("dept-platform");
+      .getByRole("combobox", { name: "选择附加共享部门" })
+      .click();
+    await page.getByRole("option", { name: "平台工程部" }).click();
     await grantsEditor.getByRole("button", { name: "添加共享" }).click();
 
-    await grantsEditor.getByLabel("附加授权类型").selectOption("role");
-    await grantsEditor.getByLabel("选择附加共享角色").selectOption("dept_admin");
+    await grantsEditor.getByRole("combobox", { name: "附加授权类型" }).click();
+    await page.getByRole("option", { name: "指定角色" }).click();
+    await grantsEditor
+      .getByRole("combobox", { name: "选择附加共享角色" })
+      .click();
+    await page.getByRole("option", { name: "部门管理员" }).click();
     await grantsEditor.getByRole("button", { name: "添加共享" }).click();
 
     await createDialog.getByRole("button", { name: "创建知识库" }).click();

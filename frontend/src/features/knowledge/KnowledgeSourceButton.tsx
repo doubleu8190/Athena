@@ -1,5 +1,6 @@
 import { useState } from "react";
 
+import { buttonVariants, TEXT_BUTTON_CLASS } from "../../shared/ui";
 import { Icon } from "../../shared/ui/Icons";
 import { downloadKnowledgeSource } from "./api";
 import { knowledgeErrorMessage } from "./errorMessages";
@@ -51,9 +52,13 @@ export function KnowledgeSourceButton({
   };
 
   return (
-    <span className="knowledge-source-action">
+    <span className="inline-flex flex-wrap items-center gap-1.5">
       <button
-        className={compact ? "text-button" : "button-quiet"}
+        className={
+          compact
+            ? TEXT_BUTTON_CLASS
+            : buttonVariants({ size: "sm", variant: "outline" })
+        }
         disabled={pending}
         onClick={() => void handleDownload()}
         type="button"
@@ -62,7 +67,10 @@ export function KnowledgeSourceButton({
         {pending ? "正在准备下载…" : "下载来源"}
       </button>
       {error ? (
-        <span className="knowledge-inline-error" role="alert">
+        <span
+          className="block text-xs leading-[1.5] text-danger"
+          role="alert"
+        >
           {error}
         </span>
       ) : null}

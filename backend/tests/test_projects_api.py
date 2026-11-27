@@ -3,13 +3,13 @@
 from __future__ import annotations
 
 import re
-from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from typing import Any, Never
 
 import pytest
 from auth_support import AuthTestClient, make_auth_service
 from fastapi.testclient import TestClient
+from project_support import InMemoryProjectRepository
 from sqlalchemy.exc import OperationalError
 
 from app.auth.service import AuthService
@@ -18,92 +18,6 @@ from domain.project import Project, ProjectPage
 from main import create_app
 
 PROJECT_ID_PATTERN = re.compile(r"^proj_[0-9a-f]{32}$")
-
-
-class InMemoryProjectRepository:
-    """为 HTTP 测试保存项目实体。"""
-
-    def __init__(self, projects: tuple[Project, ...] = ()) -> None:
-        self.items = {project.id: project for project in projects}
-
-    async def create(self, project: Project) -> Project:
-        self.items[project.id] = project
-        return project
-
-    async def get(self, owner_id: str, project_id: str) -> Project | None:
-        project = self.items.get(project_id)
-        if project is None or project.owner_id != owner_id or project.deleted_time is not None:
-            return None
-        return project
-
-    async def list_active(
-        self,
-        owner_id: str,
-        *,
-        offset: int,
-        limit: int,
-    ) -> ProjectPage:
-        active = sorted(
-            (
-                project
-                for project in self.items.values()
-                if project.owner_id == owner_id and project.deleted_time is None
-            ),
-            key=lambda project: (project.updated_at, project.id),
-            reverse=True,
-        )
-        return ProjectPage(items=tuple(active[offset : offset + limit]), total=len(active))
-
-    async def update(
-        self,
-        owner_id: str,
-        project_id: str,
-        *,
-        update_name: bool,
-        name: str | None,
-        update_description: bool,
-        description: str | None,
-        update_instructions: bool,
-        instructions: str | None,
-        update_default_skills: bool,
-        default_skill_ids: tuple[str, ...] | None,
-        updated_at: datetime,
-    ) -> Project | None:
-        project = await self.get(owner_id, project_id)
-        if project is None:
-            return None
-        updated = replace(
-            project,
-            name=name if update_name and name is not None else project.name,
-            description=description if update_description else project.description,
-            instructions=instructions if update_instructions else project.instructions,
-            default_skill_ids=(
-                default_skill_ids or () if update_default_skills else project.default_skill_ids
-            ),
-            updated_at=updated_at,
-        )
-        self.items[project_id] = updated
-        return updated
-
-    async def soft_delete(
-        self,
-        owner_id: str,
-        project_id: str,
-        deleted_at: datetime,
-        *,
-        detach_sessions: bool = False,
-    ) -> bool:
-        del detach_sessions
-        project = self.items.get(project_id)
-        if project is None or project.owner_id != owner_id:
-            return False
-        if project.deleted_time is None:
-            self.items[project_id] = replace(
-                project,
-                updated_at=deleted_at,
-                deleted_time=deleted_at,
-            )
-        return True
 
 
 class FailingProjectRepository:

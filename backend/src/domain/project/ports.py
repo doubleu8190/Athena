@@ -5,18 +5,14 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Protocol
 
-from domain.project.model.entity import Project, ProjectPage
+from domain.project.model import Project, ProjectPage
 
 
-class ProjectReader(Protocol):
-    """其他业务模块只读查询项目时使用的窄端口。"""
+class ProjectRepository(Protocol):
+    """项目持久化端口。"""
 
     async def get(self, owner_id: str, project_id: str) -> Project | None:
         """读取未删除项目。"""
-
-
-class ProjectRepository(ProjectReader, Protocol):
-    """项目持久化端口。"""
 
     async def create(self, project: Project) -> Project:
         """保存新项目。"""
@@ -63,4 +59,4 @@ class ProjectRepository(ProjectReader, Protocol):
         """
 
 
-__all__ = ["ProjectReader", "ProjectRepository"]
+__all__ = ["ProjectRepository"]

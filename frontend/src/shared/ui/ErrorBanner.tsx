@@ -1,4 +1,5 @@
 import { InlineAlert } from "./InlineAlert";
+import { TEXT_BUTTON_CLASS } from "./workspaceStyles";
 
 interface ErrorBannerProps {
   message: string;
@@ -18,12 +19,16 @@ export function ErrorBanner({
     <InlineAlert
       action={
         onRetry ? (
-          <button className="text-button" onClick={onRetry} type="button">
+          <button
+            className={TEXT_BUTTON_CLASS}
+            onClick={onRetry}
+            type="button"
+          >
             {retryLabel}
           </button>
         ) : undefined
       }
-      className="workspace-error gap-[9px] rounded-[9px] px-3 py-[11px] text-xs leading-relaxed"
+      className="gap-[9px] rounded-[9px] px-3 py-[11px] text-xs leading-relaxed"
       variant="danger"
     >
       {message}

@@ -1,5 +1,14 @@
 import { useEffect, useId, useState } from "react";
 
+import {
+  Button,
+  COMPACT_SELECT_CLASS,
+  FIELD_CLASS,
+  FIELD_TEXTAREA_CLASS,
+  MODAL_WIDTH_XL,
+  NOTICE_BRAND_CLASS,
+  NOTICE_WARNING_CLASS,
+} from "../../shared/ui";
 import { EmptyState } from "../../shared/ui/EmptyState";
 import { ErrorBanner } from "../../shared/ui/ErrorBanner";
 import { Modal } from "../../shared/ui/Modal";
@@ -31,6 +40,9 @@ interface KnowledgeSearchDialogProps {
   open: boolean;
 }
 
+const HIT_META_CLASS =
+  "mt-1 font-mono text-xs leading-[1.6] text-text-tertiary";
+
 function SearchHitDetails({
   baseId,
   hit,
@@ -40,12 +52,14 @@ function SearchHitDetails({
 }) {
   return (
     <>
-      <p className="knowledge-search-hit-meta">
+      <p className={HIT_META_CLASS}>
         {formatChannels(hit.channels)} ·{" "}
         {formatKnowledgeLocators(hit.locators)}
       </p>
-      <p className="knowledge-search-hit-text">{hit.text}</p>
-      <div className="knowledge-search-hit-actions">
+      <p className="mt-2 max-h-[9.8em] overflow-hidden text-xs leading-[1.65] whitespace-pre-wrap text-text-secondary">
+        {hit.text}
+      </p>
+      <div className="mt-[9px] flex flex-wrap items-center justify-end gap-2">
         <KnowledgeSourceButton
           baseId={baseId}
           compact
@@ -72,17 +86,17 @@ function ChunkDetailDialog({
     <Modal
       description="片段内容以纯文本显示，并绑定具体文档版本。"
       footer={
-        <button className="button-quiet" onClick={onClose} type="button">
+        <Button onClick={onClose} type="button" variant="outline">
           关闭
-        </button>
+        </Button>
       }
       onClose={onClose}
       open
-      panelClassName="knowledge-chunk-dialog"
+      panelClassName={MODAL_WIDTH_XL}
       title="来源片段"
     >
       {chunk.isPending ? (
-        <p className="knowledge-form-status" role="status">
+        <p className={NOTICE_BRAND_CLASS} role="status">
           正在加载来源片段…
         </p>
       ) : chunk.isError ? (
@@ -91,13 +105,17 @@ function ChunkDetailDialog({
           onRetry={() => void chunk.refetch()}
         />
       ) : (
-        <article className="knowledge-chunk-detail">
-          <h3>{chunk.data.title}</h3>
-          <p className="knowledge-search-hit-meta">
+        <article>
+          <h3 className="text-[15px] font-semibold text-text-primary [overflow-wrap:anywhere]">
+            {chunk.data.title}
+          </h3>
+          <p className={HIT_META_CLASS}>
             {formatChannels(chunk.data.channels)} ·{" "}
             {formatKnowledgeLocators(chunk.data.locators)}
           </p>
-          <pre>{chunk.data.text}</pre>
+          <pre className="my-3 max-h-[52vh] overflow-auto rounded-[9px] border border-border-default bg-subtle p-[13px] font-sans text-xs leading-[1.7] whitespace-pre-wrap text-text-primary">
+            {chunk.data.text}
+          </pre>
           <KnowledgeSourceButton
             baseId={baseId}
             documentId={chunk.data.document_id}
@@ -148,29 +166,30 @@ export function KnowledgeSearchDialog({
     <Modal
       description="检索结果和来源片段只来自当前知识库的后端真实数据。"
       footer={
-        <button className="button-quiet" onClick={onClose} type="button">
+        <Button onClick={onClose} type="button" variant="outline">
           关闭
-        </button>
+        </Button>
       }
       onClose={onClose}
       open={open}
-      panelClassName="knowledge-search-dialog"
+      panelClassName={MODAL_WIDTH_XL}
       title="检索测试"
     >
       <form
-        className="knowledge-search-form"
+        className="flex flex-col gap-3"
         id={formId}
         onSubmit={(event) => {
           event.preventDefault();
           handleSubmit();
         }}
       >
-        <label className="workspace-field" htmlFor={`${formId}-query`}>
+        <label className={FIELD_CLASS} htmlFor={`${formId}-query`}>
           <span>检索内容</span>
           <textarea
             aria-label="检索内容"
             aria-describedby={queryError ? queryErrorId : undefined}
             aria-invalid={Boolean(queryError)}
+            className={FIELD_TEXTAREA_CLASS}
             data-autofocus
             id={`${formId}-query`}
             onChange={(event) => {
@@ -183,11 +202,14 @@ export function KnowledgeSearchDialog({
           />
           <small>最多 4,000 个字符。</small>
         </label>
-        <div className="knowledge-search-controls">
-          <label htmlFor={`${formId}-limit`}>
+        <div className="flex flex-col items-stretch justify-between gap-[15px] min-[701px]:flex-row min-[701px]:items-end max-[700px]:[&>button]:w-full">
+          <label
+            className="flex items-center justify-between gap-2 text-xs text-text-secondary min-[701px]:justify-start"
+            htmlFor={`${formId}-limit`}
+          >
             <span>结果数量</span>
             <select
-              className="workspace-select"
+              className={COMPACT_SELECT_CLASS}
               id={`${formId}-limit`}
               onChange={(event) => setLimit(Number(event.target.value))}
               value={limit}
@@ -199,13 +221,13 @@ export function KnowledgeSearchDialog({
               ))}
             </select>
           </label>
-          <button
-            className="button-primary"
+          <Button
             disabled={search.isPending}
             type="submit"
+            variant="primary"
           >
             {search.isPending ? "正在检索…" : "开始检索"}
-          </button>
+          </Button>
         </div>
         {queryError ? (
           <p className="field-error" id={queryErrorId} role="alert">
@@ -221,14 +243,18 @@ export function KnowledgeSearchDialog({
       {search.isSuccess ? (
         <section
           aria-label="检索结果"
-          className="knowledge-search-results"
+          className="mt-[18px] flex flex-col gap-2.5 border-t border-border-subtle pt-4"
         >
-          <div className="knowledge-search-summary">
-            <strong>{search.data.hits.length} 个命中片段</strong>
-            <span>{formatChannels(search.data.channels)}</span>
+          <div className="flex items-center justify-between gap-4">
+            <strong className="text-xs text-text-primary">
+              {search.data.hits.length} 个命中片段
+            </strong>
+            <span className="text-xs text-text-tertiary">
+              {formatChannels(search.data.channels)}
+            </span>
           </div>
           {search.data.degraded_reasons.length > 0 ? (
-            <p className="knowledge-degraded-note" role="status">
+            <p className={NOTICE_WARNING_CLASS} role="status">
               检索已降级：{formatDegradedReasons(search.data.degraded_reasons)}
             </p>
           ) : null}
@@ -240,18 +266,24 @@ export function KnowledgeSearchDialog({
               title="没有检索结果"
             />
           ) : (
-            <div className="knowledge-search-hit-list">
+            <div className="flex flex-col gap-[9px]">
               {search.data.hits.map((hit) => (
-                <article className="knowledge-search-hit" key={hit.chunk_id}>
-                  <header>
-                    <h3>{hit.title}</h3>
-                    <button
-                      className="button-quiet"
+                <article
+                  className="rounded-[10px] border border-border-default bg-canvas p-3"
+                  key={hit.chunk_id}
+                >
+                  <header className="flex flex-col items-start justify-between gap-3.5 min-[701px]:flex-row max-[700px]:[&>button]:w-full">
+                    <h3 className="text-[15px] font-semibold text-text-primary [overflow-wrap:anywhere]">
+                      {hit.title}
+                    </h3>
+                    <Button
                       onClick={() => setSelectedChunkId(hit.chunk_id)}
+                      size="sm"
                       type="button"
+                      variant="outline"
                     >
                       查看片段
-                    </button>
+                    </Button>
                   </header>
                   <SearchHitDetails baseId={baseId} hit={hit} />
                 </article>

@@ -78,7 +78,7 @@ from domain.message import (
     ToolResultPart,
 )
 from domain.preference import DEFAULT_PREFERENCE_MEMORY_TOKEN_BUDGET
-from domain.project import ProjectReader
+from domain.project import ProjectRepository
 from domain.run.model import (
     DISPATCH_SUBAGENTS_TOOL_ID,
     BeginSubagentBatchCommand,
@@ -169,7 +169,7 @@ class RunExecutor:
         config: RunWorkerConfig | None = None,
         preferences: PreferenceService | None = None,
         preference_memory_token_budget: int = DEFAULT_PREFERENCE_MEMORY_TOKEN_BUDGET,
-        projects: ProjectReader | None = None,
+        projects: ProjectRepository | None = None,
         sessions: SessionRepository | None = None,
         subagents: SubagentRepository | None = None,
         access_policy: AccessPolicyService | None = None,

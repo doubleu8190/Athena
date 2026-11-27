@@ -413,7 +413,7 @@ test.describe("个人技能前端 mock 浏览器验收", () => {
       page.getByText(/已创建并启用「会议纪要」/),
     ).toContainText("不会自动加入当前对话");
     const card = page
-      .locator(".personal-skill-card")
+      .getByRole("listitem")
       .filter({ hasText: "会议纪要" });
     await expect(card).toBeVisible();
     await expect(card.getByText("个人", { exact: true })).toBeVisible();
@@ -519,7 +519,7 @@ test.describe("个人技能前端 mock 浏览器验收", () => {
       .getByRole("button", { name: "创建并启用" })
       .click();
     const personalCard = page
-      .locator(".personal-skill-card")
+      .getByRole("listitem")
       .filter({ hasText: "访谈整理" });
     await expect(personalCard).toBeVisible();
     await expectNoHorizontalOverflow(page);

@@ -3,7 +3,20 @@ import { Link, useParams, useSearchParams } from "react-router-dom";
 
 import { formatDateTime } from "../../shared/lib/format";
 import { parsePage } from "../../shared/lib/pagination";
-import { Badge, VisibilityBadge } from "../../shared/ui";
+import {
+  Badge,
+  Button,
+  ICON_BUTTON_CLASS,
+  ICON_BUTTON_DANGER_CLASS,
+  LIST_FOOTER_CLASS,
+  PAGE_LOADING_CLASS,
+  PAGE_NAV_BUTTON_CLASS,
+  PAGE_SHELL_CLASS,
+  SURFACE_CARD_CLASS,
+  TEXT_BUTTON_CLASS,
+  VisibilityBadge,
+  cn,
+} from "../../shared/ui";
 import { EmptyState } from "../../shared/ui/EmptyState";
 import { ErrorBanner } from "../../shared/ui/ErrorBanner";
 import { Icon } from "../../shared/ui/Icons";
@@ -50,6 +63,10 @@ interface DocumentRowProps {
   onVersions: (document: KnowledgeDocument) => void;
 }
 
+// 文档列表响应式列宽定义，桌面端 4 列展示，窄屏（<=700px）自动折叠为信息行与右上操作区。
+const DOC_GRID_COLS_CLASS =
+  "min-[701px]:grid-cols-[minmax(190px,1.2fr)_minmax(220px,1.35fr)_110px_138px] min-[701px]:gap-2.5 min-[1181px]:grid-cols-[minmax(220px,1.25fr)_minmax(250px,1.45fr)_128px_150px] min-[1181px]:gap-4";
+
 function DocumentRow({
   baseId,
   canManage,
@@ -70,18 +87,33 @@ function DocumentRow({
   const activeVersionAvailable = document.active_version_id !== null;
 
   return (
-    <article className="knowledge-document-row">
-      <div className="knowledge-document-main">
-        <span className="knowledge-document-icon" aria-hidden="true">
+    <article
+      className={cn(
+        "grid grid-cols-[minmax(0,1fr)_auto] items-center gap-x-[13px] gap-y-2.5 border-b border-border-subtle px-[15px] py-3.5 transition-colors hover:bg-subtle min-[701px]:min-h-[76px] min-[701px]:px-[18px] min-[701px]:py-[11px]",
+        DOC_GRID_COLS_CLASS,
+      )}
+    >
+      <div className="col-span-full flex min-w-0 items-center gap-2.5 min-[701px]:col-span-1">
+        <span
+          aria-hidden="true"
+          className="grid h-8 w-8 shrink-0 place-items-center rounded-lg border border-brand-border bg-brand-subtle text-brand-hover"
+        >
           <Icon name="book" size={16} />
         </span>
-        <div>
-          <strong>{document.title}</strong>
-          <span>更新于 {formatDateTime(document.updated_at)}</span>
+        <div className="flex min-w-0 flex-col gap-[3px]">
+          <strong className="truncate text-sm font-semibold text-text-primary">
+            {document.title}
+          </strong>
+          <span className="block text-xs leading-[1.55] text-text-tertiary min-[701px]:hidden">
+            更新于 {formatDateTime(document.updated_at)}
+          </span>
         </div>
       </div>
 
-      <div className="knowledge-document-status" aria-live="polite">
+      <div
+        className="col-span-full flex min-w-0 flex-col items-start gap-1 text-xs leading-[1.55] text-text-tertiary min-[701px]:col-span-1"
+        aria-live="polite"
+      >
         <KnowledgeStateBadge state={latest?.state ?? null} />
         {latest?.state === "ready" ? (
           <span>
@@ -94,7 +126,7 @@ function DocumentRow({
           </span>
         ) : null}
         {latest?.state === "failed" ? (
-          <span className="knowledge-row-error">
+          <span className="text-xs leading-[1.5] text-danger">
             {versionErrorMessage(latest.error_code)}
             {activeVersionAvailable
               ? " 当前检索仍使用上一已就绪版本。"
@@ -111,7 +143,7 @@ function DocumentRow({
         {hasNoVersions ? <span>后端未返回版本记录。</span> : null}
         {canRetry && latest ? (
           <button
-            className="text-button"
+            className={TEXT_BUTTON_CLASS}
             disabled={retry.isPending}
             onClick={() => retry.mutate(latest.id)}
             type="button"
@@ -120,30 +152,33 @@ function DocumentRow({
           </button>
         ) : null}
         {retry.isError ? (
-          <span className="knowledge-inline-error" role="alert">
+          <span
+            className="inline-flex flex-wrap gap-1 text-xs leading-[1.5] text-danger"
+            role="alert"
+          >
             {knowledgeErrorMessage(retry.error)}
           </span>
         ) : null}
         {retry.isSuccess ? (
-          <span className="knowledge-status-success" role="status">
+          <span className="text-xs text-success" role="status">
             已重新排队
           </span>
         ) : null}
       </div>
 
       <time
-        className="knowledge-document-time"
+        className="hidden font-mono text-xs leading-[1.55] text-text-tertiary min-[701px]:block"
         dateTime={document.updated_at}
       >
         {formatDateTime(document.updated_at)}
       </time>
 
-      <div className="knowledge-document-actions">
+      <div className="col-start-2 grid grid-cols-[repeat(2,31px)] justify-end gap-0.5 min-[421px]:flex min-[701px]:col-start-auto">
         {canManage ? (
           <>
             <button
               aria-label={`重命名文档：${document.title}`}
-              className="icon-button"
+              className={ICON_BUTTON_CLASS}
               onClick={() => onRename(document)}
               title="重命名文档"
               type="button"
@@ -152,7 +187,7 @@ function DocumentRow({
             </button>
             <button
               aria-label={`添加新版本：${document.title}`}
-              className="icon-button"
+              className={ICON_BUTTON_CLASS}
               disabled={document.pending_version_id !== null}
               onClick={() => onReplace(document)}
               title={
@@ -168,7 +203,7 @@ function DocumentRow({
         ) : null}
         <button
           aria-label={`版本历史：${document.title}`}
-          className="icon-button"
+          className={ICON_BUTTON_CLASS}
           onClick={() => onVersions(document)}
           title="版本历史"
           type="button"
@@ -178,7 +213,7 @@ function DocumentRow({
         {canManage ? (
           <button
             aria-label={`删除文档：${document.title}`}
-            className="icon-button icon-button--danger"
+            className={cn(ICON_BUTTON_CLASS, ICON_BUTTON_DANGER_CLASS)}
             onClick={() => onDelete(document)}
             title="删除文档"
             type="button"
@@ -255,8 +290,8 @@ export function KnowledgeDetailPage() {
 
   if (base.isPending) {
     return (
-      <div className="page-shell">
-        <div className="page-loading" role="status">
+      <div className={PAGE_SHELL_CLASS}>
+        <div className={PAGE_LOADING_CLASS} role="status">
           正在加载知识库…
         </div>
       </div>
@@ -266,12 +301,12 @@ export function KnowledgeDetailPage() {
   if (base.isError) {
     const notFound = isKnowledgeNotFound(base.error);
     return (
-      <div className="page-shell project-error-page">
+      <div className={cn(PAGE_SHELL_CLASS, "flex flex-col gap-3.5")}>
         <EmptyState
           action={
-            <Link className="button-primary" to="/knowledge">
-              返回知识库
-            </Link>
+            <Button asChild variant="primary">
+              <Link to="/knowledge">返回知识库</Link>
+            </Button>
           }
           description={
             notFound
@@ -300,10 +335,10 @@ export function KnowledgeDetailPage() {
   const canManage = canManageKnowledgeBase(user, base.data);
 
   return (
-    <div className="page-shell knowledge-detail-page">
-      <header className="knowledge-hero">
-        <div className="knowledge-hero-top">
-          <div className="knowledge-hero-copy">
+    <div className={cn(PAGE_SHELL_CLASS, "lg:pt-8")}>
+      <header className="mb-6 rounded-[14px] border border-border-default bg-canvas p-[18px] shadow-xs sm:p-5 lg:px-[26px] lg:py-6">
+        <div className="flex flex-col items-start justify-between gap-4 lg:flex-row lg:gap-6">
+          <div className="min-w-0">
             <div className="mb-1.5 flex flex-wrap items-center gap-2">
               <VisibilityBadge
                 departmentName={departmentName}
@@ -314,69 +349,73 @@ export function KnowledgeDetailPage() {
               ) : null}
               {!canManage ? <Badge variant="neutral">只读</Badge> : null}
             </div>
-            <h1>{base.data.name}</h1>
-            <p className="knowledge-hero-description">
+            <h1 className="text-[clamp(24px,2.8vw,32px)] leading-[1.2] font-semibold tracking-[-0.025em] text-text-primary [overflow-wrap:anywhere]">
+              {base.data.name}
+            </h1>
+            <p className="mt-2 max-w-[690px] text-sm leading-[1.65] text-text-secondary">
               {base.data.description || "未填写知识库说明"}
             </p>
-            <p className="project-meta">
+            <p className="mt-2.5 font-mono text-xs leading-[1.6] text-text-tertiary">
               创建于 {formatDateTime(base.data.created_at)} · 更新于{" "}
               {formatDateTime(base.data.updated_at)}
             </p>
           </div>
-          <div className="knowledge-hero-actions">
-            <button
-              className="button-quiet"
+          <div className="flex w-full shrink-0 flex-wrap justify-start gap-2 max-[700px]:[&>*]:flex-[1_1_145px] lg:w-auto lg:justify-end">
+            <Button
               onClick={() => setSearchOpen(true)}
               type="button"
+              variant="outline"
             >
               <Icon name="search" size={14} />
               检索测试
-            </button>
+            </Button>
             {canManage ? (
               <>
-                <button
-                  className="button-quiet"
+                <Button
                   onClick={() => setEditBaseOpen(true)}
                   type="button"
+                  variant="outline"
                 >
                   <Icon name="edit" size={14} />
                   编辑
-                </button>
-                <button
-                  className="button-primary"
+                </Button>
+                <Button
                   onClick={() => setImportOpen(true)}
                   type="button"
+                  variant="primary"
                 >
                   <Icon name="plus" size={14} />
                   添加资料
-                </button>
+                </Button>
               </>
             ) : null}
           </div>
         </div>
       </header>
 
-      <div className="knowledge-detail-toolbar">
+      <div className="mb-3.5 flex flex-col items-start justify-between gap-4 px-0.5 py-1 min-[701px]:flex-row min-[701px]:items-end min-[701px]:gap-6 max-[700px]:[&>button]:w-full">
         <div>
-          <h2>文档</h2>
-          <p>
+          <h2 className="text-xl font-semibold tracking-[-0.02em] text-text-primary">
+            文档
+          </h2>
+          <p className="mt-1 max-w-[620px] text-[13px] leading-[1.6] text-text-secondary">
             处理状态来自最新版本接口；排队和处理中会自动刷新，且不展示虚构进度。
           </p>
         </div>
         {canManage ? (
-          <button
-            className="button-danger-outline"
+          <Button
             onClick={() => setDeleteBaseOpen(true)}
             type="button"
+            variant="danger-outline"
           >
             <Icon name="trash" size={14} />
             删除知识库
-          </button>
+          </Button>
         ) : null}
       </div>
 
       {documents.isPending ? (
-        <div className="page-loading" role="status">
+        <div className={PAGE_LOADING_CLASS} role="status">
           正在加载文档…
         </div>
       ) : documents.isError ? (
@@ -388,14 +427,14 @@ export function KnowledgeDetailPage() {
         <EmptyState
           action={
             canManage ? (
-              <button
-                className="button-primary"
+              <Button
                 onClick={() => setImportOpen(true)}
                 type="button"
+                variant="primary"
               >
                 <Icon name="plus" size={14} />
                 添加资料
-              </button>
+              </Button>
             ) : undefined
           }
           description={
@@ -409,9 +448,15 @@ export function KnowledgeDetailPage() {
       ) : (
         <section
           aria-label="知识库文档列表"
-          className="surface-card knowledge-document-table"
+          className={cn(SURFACE_CARD_CLASS, "overflow-hidden")}
         >
-          <div className="knowledge-document-head" aria-hidden="true">
+          <div
+            aria-hidden="true"
+            className={cn(
+              "hidden min-h-[39px] items-center border-b border-border-subtle bg-subtle px-[18px] font-mono text-xs tracking-[0.06em] text-text-tertiary uppercase min-[701px]:grid [&>:last-child]:text-right",
+              DOC_GRID_COLS_CLASS,
+            )}
+          >
             <span>文档</span>
             <span>状态</span>
             <span>更新时间</span>
@@ -429,27 +474,27 @@ export function KnowledgeDetailPage() {
               onVersions={setVersionsDocument}
             />
           ))}
-          <footer className="project-list-footer knowledge-list-footer">
+          <footer className={LIST_FOOTER_CLASS}>
             <span>
               本页 {documents.data.items.length} 份文档
               {documents.data.items.length >= responsePageSize
                 ? "（可能还有下一页）"
                 : ""}
             </span>
-            <nav className="project-pagination" aria-label="文档分页">
+            <nav className="flex items-center gap-2" aria-label="文档分页">
               <button
                 aria-label="上一页"
-                className="project-page-button"
+                className={cn(PAGE_NAV_BUTTON_CLASS, "[&>svg]:rotate-180")}
                 disabled={page <= 1}
                 onClick={() => goToPage(page - 1)}
                 type="button"
               >
                 <Icon name="chevron" size={13} />
               </button>
-              <span className="project-page-status">第 {page} 页</span>
+              <span className="text-xs text-text-secondary">第 {page} 页</span>
               <button
                 aria-label="下一页"
-                className="project-page-button project-page-button--next"
+                className={PAGE_NAV_BUTTON_CLASS}
                 disabled={documents.data.items.length < responsePageSize}
                 onClick={() => goToPage(page + 1)}
                 type="button"
@@ -533,12 +578,12 @@ export function KnowledgeDetailPage() {
 
 function NavigateToKnowledge() {
   return (
-    <div className="page-shell">
+    <div className={PAGE_SHELL_CLASS}>
       <EmptyState
         action={
-          <Link className="button-primary" to="/knowledge">
-            返回知识库
-          </Link>
+          <Button asChild variant="primary">
+            <Link to="/knowledge">返回知识库</Link>
+          </Button>
         }
         description="缺少知识库标识，无法打开详情页。"
         icon="book"

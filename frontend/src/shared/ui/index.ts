@@ -137,3 +137,4 @@ export {
   type VisibilityBadgeProps,
   type VisibilityScope,
 } from "./VisibilityBadge";
+export * from "./workspaceStyles";

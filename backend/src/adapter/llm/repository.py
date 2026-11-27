@@ -41,12 +41,12 @@ from domain.llm.model.profile_errors import (
     ModelProfileError,
     ModelProfileNotFoundError,
 )
-from domain.llm.profile_ports import CompressionPolicyRepository, ModelProfileRepository
+from domain.llm.profile_ports import ModelProfileRepository
 from domain.mcp import McpSecretError, McpSecretPurpose
 from infrastructure.security.mcp_secrets import McpSecretCipher
 
 
-class SqlAlchemyModelProfileRepository(ModelProfileRepository, CompressionPolicyRepository):
+class SqlAlchemyModelProfileRepository(ModelProfileRepository):
     """模型版本写入时复核管理员，并在调用时解封数据库凭据。"""
 
     def __init__(

@@ -40,6 +40,7 @@ from domain.run.model import (
     SubmitRunResult,
 )
 from domain.run.model.errors import (
+    InvalidRunInputError,
     RunConflictError,
     RunError,
     RunInputResourceError,
@@ -56,6 +57,7 @@ __all__ = [
     "FailRunCommand",
     "FinishRunCommand",
     "InputRequestStatus",
+    "InvalidRunInputError",
     "RecordRunUsageCommand",
     "RequestRunInputCommand",
     "Run",

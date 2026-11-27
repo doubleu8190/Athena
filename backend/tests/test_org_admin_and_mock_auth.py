@@ -14,6 +14,7 @@ import pytest
 from alembic import command
 from alembic.config import Config
 from alembic.script import ScriptDirectory
+from auth_support import FakePasswordHasher
 from fastapi.testclient import TestClient
 from pg_unit_harness import create_pg_unit_db
 from sqlalchemy import select
@@ -43,16 +44,6 @@ ALEMBIC_INI = REPO_ROOT / "backend" / "alembic.ini"
 
 def _run[T](coroutine: Coroutine[Any, Any, T]) -> T:
     return asyncio.run(coroutine)
-
-
-class _FakePasswordHasher:
-    dummy_hash = "fake:dummy"
-
-    def hash_password(self, password: str) -> str:
-        return f"fake:{password}"
-
-    def verify_password(self, password: str, password_hash: str) -> bool:
-        return password_hash != self.dummy_hash and password_hash == f"fake:{password}"
 
 
 async def _make_pg_db() -> tuple[Any, async_sessionmaker[AsyncSession]]:
@@ -101,7 +92,7 @@ def test_mock_mode_seeds_idempotently_and_issues_real_cookie_sessions() -> None:
 
         auth_service = AuthService(
             auth_repo,
-            _FakePasswordHasher(),
+            FakePasswordHasher(),
             org_reader=org_repo,
             mock_enabled=True,
             clock=lambda: now,
@@ -203,7 +194,7 @@ def test_admin_org_api_departments_users_role_status_and_last_super_admin_protec
 
         auth_service = AuthService(
             auth_repo,
-            _FakePasswordHasher(),
+            FakePasswordHasher(),
             org_reader=org_repo,
             mock_enabled=True,
             clock=lambda: now,
@@ -472,7 +463,7 @@ def test_admin_org_sync_endpoint_runs_feishu_sync_and_reports_cycle_error() -> N
         org_repo = SqlAlchemyOrgRepository(session_factory)
         auth_service = AuthService(
             auth_repo,
-            _FakePasswordHasher(),
+            FakePasswordHasher(),
             org_reader=org_repo,
             clock=lambda: now,
         )

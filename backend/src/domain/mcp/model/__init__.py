@@ -14,6 +14,7 @@ from domain.mcp.model.entity import (
     McpSecretPurpose,
     McpServer,
     McpServerConnectionState,
+    McpServerPage,
     McpServerWrite,
     McpTransport,
     extract_config_secret_placeholders,
@@ -42,7 +43,6 @@ from domain.mcp.model.execution import (
     mcp_content_projection,
     mcp_message_from_result,
 )
-from domain.mcp.model.result import McpServerPage
 
 __all__ = [
     "MAX_MCP_SECRET_BYTES",

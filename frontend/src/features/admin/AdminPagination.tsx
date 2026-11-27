@@ -1,3 +1,4 @@
+import { ICON_BUTTON_CLASS, cn } from "../../shared/ui";
 import { Icon } from "../../shared/ui/Icons";
 
 export function lastPageNumber(total: number, pageSize: number): number {
@@ -24,15 +25,22 @@ export function AdminPagination({
 }: AdminPaginationProps) {
   const hasPrevious = page > 1;
   const hasNext = page * pageSize < total;
+  const navBtnClass = cn(
+    ICON_BUTTON_CLASS,
+    "border-border-default bg-canvas",
+  );
   return (
-    <nav className="admin-pagination" aria-label={label}>
+    <nav
+      aria-label={label}
+      className="mt-4 flex items-center justify-between gap-[15px] border-t border-border-subtle pt-3.5 text-xs text-text-tertiary"
+    >
       <span>
         第 {page} 页 · 共 {total} 项
       </span>
-      <div>
+      <div className="flex gap-[5px]">
         <button
           aria-label="上一页"
-          className="icon-button admin-page-button"
+          className={cn(navBtnClass, "[&>svg]:rotate-180")}
           disabled={!hasPrevious}
           onClick={() => onPageChange(page - 1)}
           type="button"
@@ -41,7 +49,7 @@ export function AdminPagination({
         </button>
         <button
           aria-label="下一页"
-          className="icon-button admin-page-button admin-page-button--next"
+          className={navBtnClass}
           disabled={!hasNext}
           onClick={() => onPageChange(page + 1)}
           type="button"

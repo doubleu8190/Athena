@@ -179,7 +179,7 @@ async function waitForRunStatus(
 
 async function openImportedSkill(page: Page, state: SkillsLiveState) {
   const card = page
-    .locator(".admin-skill-card")
+    .getByRole("listitem")
     .filter({ hasText: state.skillName })
     .first();
   await expect(card).toBeVisible();
@@ -206,7 +206,7 @@ async function uploadVersionTwo(
     dialog.getByText(/已保存。它尚未自动成为当前版本/),
   ).toBeVisible({ timeout: 60_000 });
   const versionTab = dialog
-    .locator(".admin-skill-version-tab")
+    .locator("ol li button")
     .filter({ hasText: label })
     .first();
   await expect(versionTab).toBeVisible();
@@ -663,12 +663,10 @@ test.describe.serial("Skills 真实浏览器闭环", () => {
       await importDialog
         .getByRole("button", { name: "导入并查看检查结果" })
         .click();
-      const detailDialog = adminPage.locator(
-        ".admin-skill-detail-modal",
-      );
+      const detailDialog = adminPage.getByRole("dialog", { name: /^技能：/ });
       await expect(detailDialog).toBeVisible({ timeout: 60_000 });
       const initialVersion = detailDialog
-        .locator(".admin-skill-version-tab")
+        .locator("ol li button")
         .filter({ hasText: "v1" })
         .first();
       await expect(initialVersion).toBeVisible();

@@ -1,7 +1,16 @@
 import { useEffect, useId, useRef, useState } from "react";
 
 import { newRequestId } from "../../shared/lib/requestId";
-import { MarkdownSplitEditor } from "../../shared/ui";
+import {
+  Button,
+  FIELD_CLASS,
+  FIELD_INPUT_CLASS,
+  FIELD_TEXTAREA_CLASS,
+  MODAL_WIDTH_2XL,
+  MarkdownSplitEditor,
+  NOTICE_BRAND_CLASS,
+  cn,
+} from "../../shared/ui";
 import { ErrorBanner } from "../../shared/ui/ErrorBanner";
 import { Icon } from "../../shared/ui/Icons";
 import { Modal } from "../../shared/ui/Modal";
@@ -261,16 +270,15 @@ export function PersonalSkillEditorDialog({
       description="个人技能仅本人可见。保存后立即启用，下一次新任务会读取最新版本。"
       footer={
         <>
-          <button
-            className="button-quiet"
+          <Button
             disabled={savePending || parseMutation.isPending}
             onClick={close}
             type="button"
+            variant="outline"
           >
             取消
-          </button>
-          <button
-            className="button-primary"
+          </Button>
+          <Button
             disabled={
               savePending ||
               parseMutation.isPending ||
@@ -279,22 +287,26 @@ export function PersonalSkillEditorDialog({
             }
             form={formId}
             type="submit"
+            variant="primary"
           >
             {savePending
               ? "正在保存…"
               : mode === "create"
                 ? "创建并启用"
                 : "保存并启用新版本"}
-          </button>
+          </Button>
         </>
       }
       onClose={close}
       open={open}
-      panelClassName="personal-skill-dialog"
+      panelClassName={MODAL_WIDTH_2XL}
       title={title}
     >
       {loadingDetail ? (
-        <div className="personal-skill-dialog-state" role="status">
+        <div
+          className="grid min-h-[220px] place-items-center text-[13px] text-text-secondary"
+          role="status"
+        >
           正在读取技能最新内容…
         </div>
       ) : detailUnavailable ? (
@@ -304,26 +316,33 @@ export function PersonalSkillEditorDialog({
         />
       ) : (
         <form
-          className="personal-skill-form"
+          className="flex min-w-0 flex-col gap-[15px]"
           id={formId}
           onSubmit={(event) => {
             event.preventDefault();
             void handleSubmit();
           }}
         >
-          <div className="personal-skill-input-mode">
+          <div className="flex flex-col items-stretch justify-between gap-4 rounded-[10px] border border-border-default bg-subtle px-[13px] py-3 sm:flex-row sm:items-center">
             <div>
-              <strong>内容来源</strong>
-              <p>在线编写，或先导入一个 Markdown 文件继续编辑。</p>
+              <strong className="text-[13px] text-text-primary">内容来源</strong>
+              <p className="mt-[3px] text-xs leading-[1.55] text-text-tertiary">
+                在线编写，或先导入一个 Markdown 文件继续编辑。
+              </p>
             </div>
             <div
               aria-label="个人技能内容来源"
-              className="personal-skill-mode-switch"
+              className="inline-flex w-full shrink-0 gap-[3px] rounded-[9px] border border-border-default bg-muted p-[3px] sm:w-auto"
               role="group"
             >
               <button
                 aria-pressed={inputMode === "manual"}
-                className={inputMode === "manual" ? "is-active" : ""}
+                className={cn(
+                  "min-h-8 flex-1 rounded-md px-[11px] text-xs font-semibold transition-colors sm:flex-none",
+                  inputMode === "manual"
+                    ? "bg-canvas text-brand shadow-xs"
+                    : "bg-transparent text-text-secondary",
+                )}
                 disabled={savePending || parseMutation.isPending}
                 onClick={() => setInputMode("manual")}
                 type="button"
@@ -332,7 +351,12 @@ export function PersonalSkillEditorDialog({
               </button>
               <button
                 aria-pressed={inputMode === "import"}
-                className={inputMode === "import" ? "is-active" : ""}
+                className={cn(
+                  "min-h-8 flex-1 rounded-md px-[11px] text-xs font-semibold transition-colors sm:flex-none",
+                  inputMode === "import"
+                    ? "bg-canvas text-brand shadow-xs"
+                    : "bg-transparent text-text-secondary",
+                )}
                 disabled={savePending || parseMutation.isPending}
                 onClick={() => setInputMode("import")}
                 type="button"
@@ -343,8 +367,13 @@ export function PersonalSkillEditorDialog({
           </div>
 
           {inputMode === "import" ? (
-            <div className="personal-skill-import">
-              <label htmlFor={fileInputId}>选择单个 Markdown 文件</label>
+            <div className="flex min-w-0 flex-col gap-1.5 rounded-[10px] border border-dashed border-brand-border bg-brand-subtle p-[13px]">
+              <label
+                className="text-[13px] font-semibold text-text-primary"
+                htmlFor={fileInputId}
+              >
+                选择单个 Markdown 文件
+              </label>
               <input
                 accept=".md"
                 aria-describedby={errorDescription(
@@ -352,6 +381,7 @@ export function PersonalSkillEditorDialog({
                   fileError ? `${fileInputId}-error` : undefined,
                 )}
                 aria-invalid={fileError ? true : undefined}
+                className="w-full min-w-0 text-xs text-text-secondary"
                 disabled={savePending || parseMutation.isPending}
                 id={fileInputId}
                 onChange={(event) => {
@@ -361,11 +391,14 @@ export function PersonalSkillEditorDialog({
                 }}
                 type="file"
               />
-              <small id={`${fileInputId}-help`}>
+              <small
+                className="text-xs leading-[1.55] text-text-tertiary"
+                id={`${fileInputId}-help`}
+              >
                 仅接受 .md 扩展名，大小 1 B–1 MiB；导入只填充表单，不会自动发布。
               </small>
               {selectedFile ? (
-                <span className="personal-skill-selected-file">
+                <span className="font-mono text-xs text-brand-hover [overflow-wrap:anywhere]">
                   {selectedFile.name}
                 </span>
               ) : null}
@@ -383,19 +416,25 @@ export function PersonalSkillEditorDialog({
             </p>
           ) : null}
           {parseMutation.isPending ? (
-            <p className="personal-skill-inline-status" role="status">
+            <p
+              className="flex items-start gap-1.5 text-xs leading-[1.55] text-brand-hover"
+              role="status"
+            >
               正在解析 Markdown…
             </p>
           ) : null}
           {importedMessage ? (
-            <p className="personal-skill-inline-status" role="status">
+            <p
+              className="flex items-start gap-1.5 text-xs leading-[1.55] text-brand-hover [&>svg]:mt-px [&>svg]:shrink-0"
+              role="status"
+            >
               <Icon name="spark" size={14} />
               {importedMessage}
             </p>
           ) : null}
 
-          <div className="personal-skill-fields">
-            <div className="workspace-field">
+          <div className="flex min-w-0 flex-col gap-3.5">
+            <div className={FIELD_CLASS}>
               <label htmlFor={nameId}>技能名称</label>
               <input
                 aria-describedby={errorDescription(
@@ -404,6 +443,7 @@ export function PersonalSkillEditorDialog({
                 )}
                 aria-invalid={fieldErrors.name ? true : undefined}
                 autoComplete="off"
+                className={FIELD_INPUT_CLASS}
                 data-autofocus={mode === "create" ? true : undefined}
                 disabled={fieldsDisabled}
                 id={nameId}
@@ -423,7 +463,7 @@ export function PersonalSkillEditorDialog({
               ) : null}
             </div>
 
-            <div className="workspace-field">
+            <div className={FIELD_CLASS}>
               <label htmlFor={descriptionId}>技能描述</label>
               <textarea
                 aria-describedby={errorDescription(
@@ -431,6 +471,7 @@ export function PersonalSkillEditorDialog({
                   fieldErrors.description ? descriptionErrorId : undefined,
                 )}
                 aria-invalid={fieldErrors.description ? true : undefined}
+                className={FIELD_TEXTAREA_CLASS}
                 disabled={fieldsDisabled}
                 id={descriptionId}
                 maxLength={PERSONAL_SKILL_DESCRIPTION_MAX_LENGTH}
@@ -456,7 +497,7 @@ export function PersonalSkillEditorDialog({
               ) : null}
             </div>
 
-            <div className="workspace-field">
+            <div className={FIELD_CLASS}>
               <label htmlFor={guideId}>Markdown 正文</label>
               <MarkdownSplitEditor
                 disabled={fieldsDisabled}
@@ -476,7 +517,13 @@ export function PersonalSkillEditorDialog({
             </div>
           </div>
 
-          <div className="personal-skill-save-notice" role="note">
+          <div
+            className={cn(
+              NOTICE_BRAND_CLASS,
+              "gap-[9px] rounded-[9px] px-3 py-[11px] text-brand [&>svg]:mt-px [&>svg]:shrink-0",
+            )}
+            role="note"
+          >
             <Icon name="spark" size={16} />
             <p>
               保存后会创建不可变版本并立即启用。已开始的任务继续使用原版本，新任务使用最新版本。
@@ -484,17 +531,18 @@ export function PersonalSkillEditorDialog({
           </div>
 
           {requestError ? (
-            <div className="personal-skill-request-error">
+            <div className="flex flex-col items-start gap-2">
               <ErrorBanner message={requestError} />
               {revisionConflict ? (
-                <button
-                  className="button-quiet"
+                <Button
                   onClick={() => void refreshLatest()}
+                  size="sm"
                   type="button"
+                  variant="outline"
                 >
                   <Icon name="refresh" size={14} />
                   刷新最新内容
-                </button>
+                </Button>
               ) : null}
             </div>
           ) : null}

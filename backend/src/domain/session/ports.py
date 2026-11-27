@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Protocol
 
-from domain.session.model.entity import Session, SessionPage, SessionScope
+from domain.session.model import Session, SessionPage, SessionScope
 
 
 class SessionRepository(Protocol):

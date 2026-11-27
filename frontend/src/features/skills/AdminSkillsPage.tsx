@@ -2,7 +2,27 @@ import { FilePenLine, Sparkles } from "lucide-react";
 import { useRef, useState } from "react";
 
 import { formatDateTime } from "../../shared/lib/format";
-import { Badge } from "../../shared/ui";
+import {
+  ADMIN_CARD_CLASS,
+  ADMIN_CARD_HEADING_CLASS,
+  ADMIN_CARD_LIST_CLASS,
+  ADMIN_CODE_LINE_CLASS,
+  ADMIN_CODE_VALUE_CLASS,
+  ADMIN_DATA_COUNT_CLASS,
+  ADMIN_DETAIL_GRID_CLASS,
+  ADMIN_SECTION_CLASS,
+  ADMIN_SECTION_HEADING_CLASS,
+  ADMIN_TITLE_LINE_CLASS,
+  Badge,
+  Button,
+  PAGE_DESC_CLASS,
+  PAGE_HEADING_CLASS,
+  PAGE_HEADING_COPY_CLASS,
+  PAGE_LOADING_CLASS,
+  PAGE_SHELL_CLASS,
+  PAGE_TITLE_CLASS,
+  cn,
+} from "../../shared/ui";
 import { EmptyState } from "../../shared/ui/EmptyState";
 import { ErrorBanner } from "../../shared/ui/ErrorBanner";
 import { Icon } from "../../shared/ui/Icons";
@@ -38,38 +58,40 @@ export function AdminSkillsPage() {
   const deptAdmin = isDeptAdmin(user);
 
   return (
-    <div className="page-shell admin-page admin-skills-page">
-      <header className="page-heading">
-        <div className="page-heading-copy">
-          <h1>{deptAdmin ? "部门技能管理" : "公共技能"}</h1>
-          <p className="page-description">
+    <div className={cn(PAGE_SHELL_CLASS, "min-w-0")}>
+      <header className={PAGE_HEADING_CLASS}>
+        <div className={PAGE_HEADING_COPY_CLASS}>
+          <h1 className={PAGE_TITLE_CLASS}>
+            {deptAdmin ? "部门技能管理" : "公共技能"}
+          </h1>
+          <p className={PAGE_DESC_CLASS}>
             {deptAdmin
               ? "在线撰写部门 Markdown 模板技能或导入脚本技能包，配置跨部门共享、首页快捷推荐、当前版本与启停策略，并支持按需删除部门技能。"
               : "在线撰写全公司与各部门 Markdown 模板技能或导入可信脚本技能包，统一管理首页快捷推荐、跨部门共享、版本历史与脚本审批策略。"}
           </p>
         </div>
         <div className="flex flex-wrap items-center gap-2">
-          <button
-            className="button-quiet"
+          <Button
             onClick={() => setImportOpen(true)}
             type="button"
+            variant="outline"
           >
             <Icon name="upload" size={14} />
             导入技能 ZIP
-          </button>
-          <button
-            className="button-primary"
+          </Button>
+          <Button
             onClick={() => setCreateMarkdownOpen(true)}
             type="button"
+            variant="primary"
           >
             <FilePenLine aria-hidden="true" className="h-3.5 w-3.5 shrink-0" />
             新建在线模板技能
-          </button>
+          </Button>
         </div>
       </header>
 
       {skills.isPending ? (
-        <div className="page-loading" role="status">
+        <div className={PAGE_LOADING_CLASS} role="status">
           正在读取技能目录…
         </div>
       ) : skills.isError ? (
@@ -81,20 +103,20 @@ export function AdminSkillsPage() {
         <EmptyState
           action={
             <div className="flex flex-wrap items-center justify-center gap-2">
-              <button
-                className="button-primary"
+              <Button
                 onClick={() => setCreateMarkdownOpen(true)}
                 type="button"
+                variant="primary"
               >
                 新建在线模板技能
-              </button>
-              <button
-                className="button-quiet"
+              </Button>
+              <Button
                 onClick={() => setImportOpen(true)}
                 type="button"
+                variant="outline"
               >
                 导入第一个技能
-              </button>
+              </Button>
             </div>
           }
           description="可直接在线编写纯 Markdown 模板技能（支持导入 .md 与双栏预览），或导入包含 Python 脚本的完整 ZIP 技能包。"
@@ -104,18 +126,18 @@ export function AdminSkillsPage() {
       ) : (
         <section
           aria-labelledby="admin-skill-list-title"
-          className="admin-section"
+          className={ADMIN_SECTION_CLASS}
         >
-          <header className="admin-section-heading">
+          <header className={ADMIN_SECTION_HEADING_CLASS}>
             <div>
               <h2 id="admin-skill-list-title">技能目录</h2>
             </div>
-            <span className="admin-data-count">
+            <span className={ADMIN_DATA_COUNT_CLASS}>
               后端返回 {skills.data.length} 个技能
             </span>
           </header>
 
-          <ul className="admin-skill-list">
+          <ul className={ADMIN_CARD_LIST_CLASS}>
             {skills.data.map((skill) => {
               const scope = skillScope(skill);
               const format = skillFormat(skill);
@@ -126,10 +148,15 @@ export function AdminSkillsPage() {
               const starterPromptSummary = skill.starter_prompt?.trim() ?? "";
 
               return (
-                <li className="admin-skill-card" key={skill.id}>
-                  <div className="admin-card-heading">
+                <li className={ADMIN_CARD_CLASS} key={skill.id}>
+                  <div
+                    className={cn(
+                      ADMIN_CARD_HEADING_CLASS,
+                      "max-[720px]:flex-col",
+                    )}
+                  >
                     <div className="min-w-0">
-                      <div className="admin-title-line">
+                      <div className={ADMIN_TITLE_LINE_CLASS}>
                         <h3>{skill.name}</h3>
                         <SkillScopeBadge
                           departmentName={
@@ -151,18 +178,17 @@ export function AdminSkillsPage() {
                             首页推荐
                           </Badge>
                         ) : null}
-                        <span
-                          className={`admin-status-badge ${
-                            skill.enabled ? " is-success" : " is-muted"
-                          }`}
+                        <Badge
+                          className="rounded-full"
+                          variant={skill.enabled ? "success" : "neutral"}
                         >
                           {skill.enabled ? "已启用" : "未启用"}
-                        </span>
-                        <span className="admin-status-badge">
+                        </Badge>
+                        <Badge className="rounded-full" variant="neutral">
                           revision {skill.revision}
-                        </span>
+                        </Badge>
                       </div>
-                      <p className="admin-code-line">
+                      <p className={ADMIN_CODE_LINE_CLASS}>
                         {skill.slug} · {skill.description}
                       </p>
                       {starterPromptSummary ? (
@@ -174,20 +200,21 @@ export function AdminSkillsPage() {
                         </p>
                       ) : null}
                     </div>
-                    <button
-                      className="button-quiet"
+                    <Button
                       onClick={(event) => {
                         lastDetailTriggerRef.current = event.currentTarget;
                         setSelectedSkillId(skill.id);
                       }}
+                      size="sm"
                       type="button"
+                      variant="outline"
                     >
                       <Icon name="eye" size={14} />
                       查看版本与指南
-                    </button>
+                    </Button>
                   </div>
 
-                  <dl className="admin-detail-grid">
+                  <dl className={ADMIN_DETAIL_GRID_CLASS}>
                     <div>
                       <dt>当前版本</dt>
                       <dd>
@@ -224,7 +251,7 @@ export function AdminSkillsPage() {
                     </div>
                     <div>
                       <dt>技能 ID</dt>
-                      <dd className="admin-code-value">{skill.id}</dd>
+                      <dd className={ADMIN_CODE_VALUE_CLASS}>{skill.id}</dd>
                     </div>
                   </dl>
                 </li>

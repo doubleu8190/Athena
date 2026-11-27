@@ -86,6 +86,14 @@ class McpServer:
 
 
 @dataclass(frozen=True, slots=True)
+class McpServerPage:
+    """按更新时间倒序返回的 Server 分页。"""
+
+    items: tuple[McpServer, ...]
+    total: int
+
+
+@dataclass(frozen=True, slots=True)
 class McpServerConnectionState:
     """仅供受控应用层运维路径（保密合并/重发现）使用的 Server 投影与已解封凭据。"""
 
@@ -239,6 +247,7 @@ __all__ = [
     "McpSecretPurpose",
     "McpServer",
     "McpServerConnectionState",
+    "McpServerPage",
     "McpServerWrite",
     "McpTransport",
     "extract_config_secret_placeholders",

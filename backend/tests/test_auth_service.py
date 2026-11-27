@@ -10,8 +10,9 @@ from threading import Event, Lock
 from typing import Any
 
 import pytest
-from auth_support import InMemoryAuthRepository
+from auth_support import FakePasswordHasher, InMemoryAuthRepository
 
+from api.converter.auth import user_to_response
 from app.auth.rate_limit import FixedWindowRateLimiter
 from app.auth.service import (
     DEFAULT_SESSION_SECONDS,
@@ -28,7 +29,6 @@ from domain.auth import (
     InvalidEmailError,
     InvalidPasswordError,
     PasswordChangeNotSupportedError,
-    PasswordHasher,
     RateLimitExceededError,
     User,
     UserRole,
@@ -39,22 +39,6 @@ from infrastructure.security.password import Argon2PasswordHasher
 
 def _run[T](coroutine: Coroutine[Any, Any, T]) -> T:
     return asyncio.run(coroutine)
-
-
-class FakePasswordHasher(PasswordHasher):
-    """快速、可观测的确定性密码哈希器。"""
-
-    dummy_hash = "fake:dummy"
-
-    def __init__(self) -> None:
-        self.verify_calls: list[tuple[str, str]] = []
-
-    def hash_password(self, password: str) -> str:
-        return f"fake:{password}"
-
-    def verify_password(self, password: str, password_hash: str) -> bool:
-        self.verify_calls.append((password, password_hash))
-        return password_hash != self.dummy_hash and password_hash == f"fake:{password}"
 
 
 class MutableClock:
@@ -110,7 +94,7 @@ def _service(
     return service, repository, hasher, current_clock
 
 
-def test_provision_local_user_normalizes_email_and_never_returns_password_hash() -> None:
+def test_provision_local_user_normalizes_email_and_hashes_password() -> None:
     async def scenario() -> None:
         service, repository, _, _ = _service()
         created = await service.provision_local_user(
@@ -126,6 +110,8 @@ def test_provision_local_user_normalizes_email_and_never_returns_password_hash()
         stored = repository.users["usr_1"]
         assert stored.password_hash == "fake:long-enough-password"
         assert "password" not in created.__dataclass_fields__
+        # 验证 API 响应转换边界严格过滤 password_hash，绝不向客户端暴露。
+        assert "password_hash" not in user_to_response(created).model_dump()
 
     _run(scenario())
 

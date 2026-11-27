@@ -8,6 +8,27 @@ import {
 } from "../../shared/api/client";
 import { formatDateTime } from "../../shared/lib/format";
 import { countCodePoints } from "../../shared/lib/text";
+import {
+  ADMIN_CODE_VALUE_CLASS,
+  ADMIN_DATA_COUNT_CLASS,
+  ADMIN_SECTION_CLASS,
+  ADMIN_SECTION_HEADING_CLASS,
+  ADMIN_TITLE_LINE_CLASS,
+  Badge,
+  Button,
+  EMPTY_INLINE_CLASS,
+  FIELD_CLASS,
+  FIELD_TEXTAREA_CLASS,
+  MODAL_WIDTH_MD,
+  NOTICE_WARNING_CLASS,
+  PAGE_DESC_CLASS,
+  PAGE_HEADING_CLASS,
+  PAGE_HEADING_COPY_CLASS,
+  PAGE_LOADING_CLASS,
+  PAGE_SHELL_CLASS,
+  PAGE_TITLE_CLASS,
+  cn,
+} from "../../shared/ui";
 import { ErrorBanner } from "../../shared/ui/ErrorBanner";
 import { Icon } from "../../shared/ui/Icons";
 import { Modal } from "../../shared/ui/Modal";
@@ -595,11 +616,11 @@ export function AdminSystemPromptsPage() {
   })();
 
   return (
-    <div className="page-shell admin-page admin-system-prompts-page">
-      <header className="page-heading">
-        <div className="page-heading-copy">
-          <h1>系统提示词</h1>
-          <p className="page-description">
+    <div className={cn(PAGE_SHELL_CLASS, "min-w-0")}>
+      <header className={PAGE_HEADING_CLASS}>
+        <div className={PAGE_HEADING_COPY_CLASS}>
+          <h1 className={PAGE_TITLE_CLASS}>系统提示词</h1>
+          <p className={PAGE_DESC_CLASS}>
             管理主对话与历史压缩的全局纯文本提示词。保存会创建不可变版本并立即供后续新任务使用，已有任务继续使用创建时固定的版本。
           </p>
         </div>
@@ -607,52 +628,73 @@ export function AdminSystemPromptsPage() {
 
       <div
         aria-label="系统提示词类别"
-        className="admin-system-prompt-tabs"
+        className="mb-4 grid grid-cols-1 gap-[9px] sm:grid-cols-2"
         role="tablist"
       >
-        {PROMPT_KINDS.map((definition) => (
-          <button
-            aria-controls={`system-prompt-panel-${definition.kind}`}
-            aria-selected={activeKind === definition.kind}
-            className={`admin-system-prompt-tab${
-              activeKind === definition.kind ? " is-active" : ""
-            }`}
-            disabled={actionPending}
-            id={`system-prompt-tab-${definition.kind}`}
-            key={definition.kind}
-            onClick={() => requestKindChange(definition.kind)}
-            role="tab"
-            type="button"
-          >
-            <strong>{definition.label}</strong>
-            <span>{definition.description}</span>
-          </button>
-        ))}
+        {PROMPT_KINDS.map((definition) => {
+          const isActive = activeKind === definition.kind;
+          return (
+            <button
+              aria-controls={`system-prompt-panel-${definition.kind}`}
+              aria-selected={isActive}
+              className={cn(
+                "flex min-w-0 flex-col items-start gap-1 rounded-[11px] border px-4 py-3.5 text-left transition-colors disabled:cursor-wait disabled:opacity-70",
+                isActive
+                  ? "border-brand-border bg-brand-subtle text-brand-hover shadow-[inset_3px_0_0_var(--brand-hover)]"
+                  : "border-border-default bg-canvas text-text-secondary hover:enabled:border-brand-border hover:enabled:bg-subtle",
+              )}
+              disabled={actionPending}
+              id={`system-prompt-tab-${definition.kind}`}
+              key={definition.kind}
+              onClick={() => requestKindChange(definition.kind)}
+              role="tab"
+              type="button"
+            >
+              <strong
+                className={cn(
+                  "text-base font-semibold",
+                  isActive ? "text-brand" : "text-text-primary",
+                )}
+              >
+                {definition.label}
+              </strong>
+              <span className="text-xs leading-[1.55]">
+                {definition.description}
+              </span>
+            </button>
+          );
+        })}
       </div>
 
       {notice ? (
         <div
-          className={`admin-system-prompt-notice is-${notice.kind}`}
+          className={cn(
+            "mb-4 flex items-start gap-2 rounded-[9px] border px-3 py-[11px] text-xs leading-[1.65] [&>svg]:mt-0.5 [&>svg]:shrink-0",
+            notice.kind === "success"
+              ? "border-success-border bg-success-bg text-success"
+              : "border-danger-border bg-danger-bg text-danger",
+          )}
           role={notice.kind === "error" ? "alert" : "status"}
         >
           <Icon
             name={notice.kind === "error" ? "shield" : "spark"}
             size={16}
           />
-          <div className="admin-system-prompt-notice-copy">
-            <span>{notice.text}</span>
+          <div className="flex min-w-0 flex-1 flex-col items-start gap-2">
+            <span className="[overflow-wrap:anywhere]">{notice.text}</span>
             {notice.action === "verify-restore" ? (
-              <button
-                className="button-quiet"
+              <Button
                 disabled={actionPending}
                 onClick={() => void handleVerifyRestore()}
+                size="sm"
                 type="button"
+                variant="outline"
               >
                 <Icon name="refresh" size={14} />
                 {verificationPending
                   ? "正在重新读取…"
                   : "重新读取当前版本与历史"}
-              </button>
+              </Button>
             ) : null}
           </div>
         </div>
@@ -664,7 +706,7 @@ export function AdminSystemPromptsPage() {
         role="tabpanel"
       >
         {current.isPending ? (
-          <div className="page-loading" role="status">
+          <div className={PAGE_LOADING_CLASS} role="status">
             正在读取{activeDefinition?.label}系统提示词…
           </div>
         ) : current.isError && !current.data ? (
@@ -674,25 +716,25 @@ export function AdminSystemPromptsPage() {
             retryLabel="重新读取"
           />
         ) : editor ? (
-          <div className="admin-system-prompt-layout">
+          <div className="grid min-w-0 grid-cols-1 items-start gap-[18px] lg:grid-cols-[minmax(0,1.45fr)_minmax(300px,0.8fr)]">
             <section
               aria-labelledby="system-prompt-editor-title"
-              className="admin-section admin-system-prompt-editor"
+              className={ADMIN_SECTION_CLASS}
             >
-              <header className="admin-section-heading">
+              <header className={ADMIN_SECTION_HEADING_CLASS}>
                 <div>
                   <h2 id="system-prompt-editor-title">
                     {activeDefinition?.label}正文
                   </h2>
                 </div>
-                <span className="admin-status-badge is-accent">
+                <Badge className="rounded-full" variant="brand">
                   {latestServerVersionChanged ? "编辑基线" : "当前版本"}{" "}
                   {editor.baselineId}
-                </span>
+                </Badge>
               </header>
 
               {current.isError ? (
-                <div className="admin-page-alert">
+                <div className="mb-4">
                   <ErrorBanner
                     message={`后台复核当前版本失败。${adminErrorMessage(current.error)}`}
                     onRetry={() => void current.refetch()}
@@ -701,7 +743,7 @@ export function AdminSystemPromptsPage() {
                 </div>
               ) : null}
 
-              <dl className="admin-system-prompt-meta">
+              <dl className="mb-3.5 grid grid-cols-1 gap-[9px] sm:grid-cols-3 [&>div]:min-w-0 [&>div]:rounded-[9px] [&>div]:border [&>div]:border-border-default [&>div]:bg-subtle [&>div]:px-[11px] [&>div]:py-2.5 [&_dt]:text-xs [&_dt]:text-text-tertiary [&_dd]:mt-[3px] [&_dd]:text-xs [&_dd]:leading-[1.55] [&_dd]:font-semibold [&_dd]:text-text-primary [&_dd]:[overflow-wrap:anywhere]">
                 <div>
                   <dt>修改人</dt>
                   <dd>{sourceLabel(editor.baselineCreatedBy)}</dd>
@@ -720,14 +762,15 @@ export function AdminSystemPromptsPage() {
                 </div>
               </dl>
 
-              <label
-                className="workspace-field admin-system-prompt-field"
-                htmlFor="system-prompt-content"
-              >
+              <label className={FIELD_CLASS} htmlFor="system-prompt-content">
                 <span>完整正文（纯文本）</span>
                 <textarea
                   aria-label="完整正文（纯文本）"
                   aria-describedby="system-prompt-content-help"
+                  className={cn(
+                    FIELD_TEXTAREA_CLASS,
+                    "min-h-[clamp(360px,52vh,680px)] font-mono text-[13px] leading-[1.7] whitespace-pre-wrap",
+                  )}
                   disabled={actionPending}
                   id="system-prompt-content"
                   onChange={(event) => {
@@ -757,7 +800,7 @@ export function AdminSystemPromptsPage() {
                 </small>
               </label>
 
-              <div className="admin-system-prompt-editor-status">
+              <div className="mt-[7px] flex items-center justify-between gap-3.5 text-xs text-text-tertiary">
                 <span>
                   {countCodePoints(editor.draft).toLocaleString()} /{" "}
                   {SYSTEM_PROMPT_CONTENT_MAX_LENGTH.toLocaleString()} 字符
@@ -768,101 +811,114 @@ export function AdminSystemPromptsPage() {
               </div>
 
               {isDirty && validationError ? (
-                <p className="admin-system-prompt-validation" role="alert">
+                <p
+                  className="mt-[9px] text-xs font-semibold text-danger"
+                  role="alert"
+                >
                   {validationError}
                 </p>
               ) : null}
 
               {latestServerVersionChanged && isDirty ? (
-                <div className="admin-system-prompt-reconcile" role="alert">
+                <div
+                  className={cn(
+                    NOTICE_WARNING_CLASS,
+                    "mt-3 flex flex-col items-stretch justify-between gap-[15px] rounded-[9px] p-3 sm:flex-row sm:items-start",
+                  )}
+                  role="alert"
+                >
                   <div>
-                    <strong>服务端当前版本已在编辑期间变化</strong>
-                    <p>
+                    <strong className="text-xs">
+                      服务端当前版本已在编辑期间变化
+                    </strong>
+                    <p className="mt-1 text-xs leading-[1.65]">
                       服务端当前版本为 {current.data?.id}；本地输入和上方
                       {editor.baselineId} 基线均未改动。保存将触发 CAS
                       冲突，请先复制需要保留的内容，再重新载入服务端版本核对。
                     </p>
                   </div>
-                  <div className="admin-system-prompt-reconcile-actions">
-                    <button
-                      className="button-quiet"
+                  <div className="flex shrink-0 flex-wrap justify-stretch gap-1.5 sm:justify-end max-sm:[&>button]:flex-1">
+                    <Button
                       disabled={actionPending}
                       onClick={() => void handleCopy()}
+                      size="sm"
                       type="button"
+                      variant="outline"
                     >
                       复制当前输入
-                    </button>
-                    <button
-                      className="button-quiet"
+                    </Button>
+                    <Button
                       disabled={actionPending}
                       onClick={() => {
                         setCopyStatus(null);
                         setPendingConfirmation({ type: "reload" });
                       }}
+                      size="sm"
                       type="button"
+                      variant="outline"
                     >
                       <Icon name="refresh" size={14} />
                       重新加载服务端版本
-                    </button>
+                    </Button>
                   </div>
                 </div>
               ) : null}
 
               {copyStatus ? (
-                <p className="admin-system-prompt-copy-status" role="status">
+                <p className="mt-2 text-xs text-brand-hover" role="status">
                   {copyStatus}
                 </p>
               ) : null}
 
-              <footer className="admin-system-prompt-savebar">
-                <p>
+              <footer className="mt-[15px] flex flex-col items-stretch justify-between gap-3.5 border-t border-border-subtle pt-[13px] sm:flex-row sm:items-center">
+                <p className="max-w-[560px] text-xs leading-[1.65] text-text-tertiary">
                   保存后立即创建不可变版本。并发修改会返回冲突，当前输入不会被覆盖。
                 </p>
-                <div>
+                <div className="flex shrink-0 gap-[7px] max-sm:[&>button]:flex-1">
                   {isDirty ? (
-                    <button
-                      className="button-quiet"
+                    <Button
                       disabled={actionPending}
                       onClick={() => {
                         setCopyStatus(null);
                         setPendingConfirmation({ type: "reload" });
                       }}
                       type="button"
+                      variant="outline"
                     >
                       放弃修改并重新加载
-                    </button>
+                    </Button>
                   ) : null}
-                  <button
-                    className="button-primary"
+                  <Button
                     disabled={
                       !isDirty || Boolean(validationError) || actionPending
                     }
                     onClick={() => void handleSave()}
                     type="button"
+                    variant="primary"
                   >
                     {saveMutation.isPending ? "正在保存…" : "保存并生效"}
-                  </button>
+                  </Button>
                 </div>
               </footer>
             </section>
 
             <section
               aria-labelledby="system-prompt-history-title"
-              className="admin-section admin-system-prompt-history"
+              className={ADMIN_SECTION_CLASS}
             >
-              <header className="admin-section-heading">
+              <header className={ADMIN_SECTION_HEADING_CLASS}>
                 <div>
                   <h2 id="system-prompt-history-title">版本历史</h2>
                 </div>
                 {history.isSuccess ? (
-                  <span className="admin-data-count">
+                  <span className={ADMIN_DATA_COUNT_CLASS}>
                     共 {history.data.total} 个版本
                   </span>
                 ) : null}
               </header>
 
               {history.isPending ? (
-                <div className="page-loading" role="status">
+                <div className={PAGE_LOADING_CLASS} role="status">
                   正在读取版本历史…
                 </div>
               ) : history.isError ? (
@@ -872,65 +928,76 @@ export function AdminSystemPromptsPage() {
                   retryLabel="重新读取历史"
                 />
               ) : history.data.items.length === 0 ? (
-                <p className="admin-empty-inline">后端尚未返回任何历史版本。</p>
+                <p className={EMPTY_INLINE_CLASS}>后端尚未返回任何历史版本。</p>
               ) : (
                 <>
-                  <ol className="admin-system-prompt-version-list">
+                  <ol className="m-0 flex list-none flex-col gap-2 p-0">
                     {history.data.items.map((version) => {
                       const isCurrent = version.id === current.data?.id;
                       return (
                         <li
-                          className={`admin-system-prompt-version${
-                            isCurrent ? " is-current" : ""
-                          }`}
+                          className={cn(
+                            "flex min-w-0 flex-col items-start justify-between gap-2.5 rounded-[9px] border bg-canvas p-[11px] sm:flex-row",
+                            isCurrent
+                              ? "border-brand-border shadow-[inset_3px_0_0_var(--brand-hover)]"
+                              : "border-border-default",
+                          )}
                           key={version.id}
                         >
-                          <div>
-                            <div className="admin-title-line">
-                              <strong className="admin-code-value">
+                          <div className="min-w-0">
+                            <div className={ADMIN_TITLE_LINE_CLASS}>
+                              <strong className={ADMIN_CODE_VALUE_CLASS}>
                                 {version.id}
                               </strong>
                               {isCurrent ? (
-                                <span className="admin-status-badge is-success">
+                                <Badge
+                                  className="rounded-full"
+                                  variant="success"
+                                >
                                   当前生效
-                                </span>
+                                </Badge>
                               ) : null}
                               {version.restored_from_version_id ? (
-                                <span className="admin-status-badge">
+                                <Badge
+                                  className="rounded-full"
+                                  variant="neutral"
+                                >
                                   恢复自 {version.restored_from_version_id}
-                                </span>
+                                </Badge>
                               ) : null}
                             </div>
-                            <p>
+                            <p className="mt-[5px] text-xs leading-[1.55] text-text-tertiary [overflow-wrap:anywhere]">
                               {sourceLabel(version.created_by)} ·{" "}
                               {formatDateTime(version.created_at)}
                             </p>
                           </div>
-                          <button
+                          <Button
                             aria-label={`查看版本 ${version.id}`}
-                            className="button-quiet"
+                            className="shrink-0"
                             disabled={actionPending}
                             onClick={() =>
                               setSelectedVersionId((selected) =>
                                 selected === version.id ? null : version.id,
                               )
                             }
+                            size="sm"
                             type="button"
+                            variant="outline"
                           >
                             <Icon name="eye" size={14} />
                             {selectedVersionId === version.id
                               ? "收起正文"
                               : "查看正文"}
-                          </button>
+                          </Button>
                         </li>
                       );
                     })}
                   </ol>
 
                   {selectedVersionId ? (
-                    <div className="admin-system-prompt-version-detail">
+                    <div className="mt-3 overflow-hidden rounded-[10px] border border-border-default bg-subtle">
                       {selectedVersion.isPending ? (
-                        <div className="page-loading" role="status">
+                        <div className={PAGE_LOADING_CLASS} role="status">
                           正在读取历史正文…
                         </div>
                       ) : selectedVersion.isError ? (
@@ -941,13 +1008,16 @@ export function AdminSystemPromptsPage() {
                         />
                       ) : selectedVersion.data ? (
                         <>
-                          <header>
-                            <div>
-                              <span>历史版本完整正文</span>
-                              <strong>{selectedVersion.data.id}</strong>
+                          <header className="flex flex-col items-start justify-between gap-3 border-b border-border-subtle px-3 py-[11px] sm:flex-row sm:items-center">
+                            <div className="flex min-w-0 flex-col gap-0.5">
+                              <span className="text-xs text-text-tertiary">
+                                历史版本完整正文
+                              </span>
+                              <strong className="font-mono text-xs text-brand [overflow-wrap:anywhere]">
+                                {selectedVersion.data.id}
+                              </strong>
                             </div>
-                            <button
-                              className="button-quiet"
+                            <Button
                               disabled={
                                 actionPending ||
                                 selectedVersion.data.id === current.data?.id
@@ -959,15 +1029,19 @@ export function AdminSystemPromptsPage() {
                                   type: "restore",
                                 });
                               }}
+                              size="sm"
                               type="button"
+                              variant="outline"
                             >
                               <Icon name="history" size={14} />
                               {selectedVersion.data.id === current.data?.id
                                 ? "当前生效版本"
                                 : "恢复此版本"}
-                            </button>
+                            </Button>
                           </header>
-                          <pre>{selectedVersion.data.content}</pre>
+                          <pre className="m-0 max-h-[460px] overflow-auto p-3.5 font-mono text-xs leading-[1.7] break-words whitespace-pre-wrap text-text-primary">
+                            {selectedVersion.data.content}
+                          </pre>
                         </>
                       ) : null}
                     </div>
@@ -994,28 +1068,27 @@ export function AdminSystemPromptsPage() {
         closeDisabled={reloadPending || restoreMutation.isPending}
         description={confirmationCopy?.description}
         footer={
-          <div className="admin-system-prompt-confirm-actions">
-            <button
-              className="button-quiet"
+          <div className="flex flex-wrap justify-end gap-[7px] max-sm:[&>button]:flex-1">
+            <Button
               disabled={reloadPending || restoreMutation.isPending}
               onClick={cancelPendingConfirmation}
               type="button"
+              variant="outline"
             >
               {routeSaveAttempt?.status === "pending" &&
               pendingConfirmation?.type === "route"
                 ? "留在此页"
                 : "继续编辑"}
-            </button>
-            <button
-              className="button-quiet"
+            </Button>
+            <Button
               disabled={reloadPending || restoreMutation.isPending}
               onClick={() => void handleCopy()}
               type="button"
+              variant="outline"
             >
               复制当前输入
-            </button>
-            <button
-              className="button-primary"
+            </Button>
+            <Button
               disabled={reloadPending || restoreMutation.isPending}
               onClick={
                 pendingConfirmation?.type === "reload"
@@ -1023,11 +1096,12 @@ export function AdminSystemPromptsPage() {
                   : confirmDiscard
               }
               type="button"
+              variant="primary"
             >
               {reloadPending || restoreMutation.isPending
                 ? "正在处理…"
                 : confirmationCopy?.confirmLabel}
-            </button>
+            </Button>
           </div>
         }
         onClose={() => {
@@ -1036,10 +1110,10 @@ export function AdminSystemPromptsPage() {
           }
         }}
         open={Boolean(pendingConfirmation)}
-        panelClassName="admin-system-prompt-confirm"
+        panelClassName={MODAL_WIDTH_MD}
         title={confirmationCopy?.title ?? ""}
       >
-        <p className="admin-system-prompt-confirm-preview">
+        <p className="text-xs leading-[1.75] text-text-secondary">
           当前正文 {countCodePoints(editor?.draft ?? "")} 个字符。
           {copyStatus ? ` ${copyStatus}` : ""}
         </p>

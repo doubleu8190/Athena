@@ -1,5 +1,24 @@
 import { useEffect, useId, useMemo, useState } from "react";
 
+import {
+  Button,
+  CHECK_GRID_CLASS,
+  CHECKBOX_INPUT_CLASS,
+  CHECKBOX_INPUT_DANGER_CLASS,
+  CHECKBOX_LABEL_CLASS,
+  CONFIRM_COPY_CLASS,
+  FIELD_CLASS,
+  FIELD_INPUT_CLASS,
+  FIELD_SELECT_CLASS,
+  FORM_GRID_2_CLASS,
+  FORM_GRID_3_CLASS,
+  FORM_STACK_CLASS,
+  MODAL_WIDTH_LG,
+  MODAL_WIDTH_XL,
+  NOTICE_BRAND_CLASS,
+  NOTICE_WARNING_CLASS,
+  cn,
+} from "../../shared/ui";
 import { ErrorBanner } from "../../shared/ui/ErrorBanner";
 import { FieldError } from "../../shared/ui/FieldError";
 import { Modal } from "../../shared/ui/Modal";
@@ -110,31 +129,31 @@ export function ModelProfileCreateDialog({
       description="模型版本创建后不可编辑或删除；新版本可用于默认模型或上下文压缩。"
       footer={
         <>
-          <button
-            className="button-quiet"
+          <Button
             disabled={mutation.isPending}
             onClick={close}
             type="button"
+            variant="outline"
           >
             取消
-          </button>
-          <button
-            className="button-primary"
+          </Button>
+          <Button
             disabled={mutation.isPending}
             form={formId}
             type="submit"
+            variant="primary"
           >
             {mutation.isPending ? "正在创建版本…" : "创建不可变版本"}
-          </button>
+          </Button>
         </>
       }
       onClose={close}
       open={open}
-      panelClassName="admin-modal admin-model-form-modal"
+      panelClassName={MODAL_WIDTH_LG}
       title="创建模型版本"
     >
       <form
-        className="admin-form"
+        className={FORM_STACK_CLASS}
         id={formId}
         noValidate
         onSubmit={(event) => {
@@ -142,10 +161,13 @@ export function ModelProfileCreateDialog({
           void handleSubmit();
         }}
       >
-        <fieldset disabled={mutation.isPending}>
-          {/* 双列网格内使用独立 workspace-field 容器包裹 label、input 与错误提示，防止报错节点挤占网格列并保持无障碍标签纯净 */}
-          <div className="admin-form-grid">
-            <div className="workspace-field">
+        <fieldset
+          className={cn(FORM_STACK_CLASS, "m-0 border-0 p-0")}
+          disabled={mutation.isPending}
+        >
+          {/* 双列网格内使用独立字段容器包裹 label、input 与错误提示，防止报错节点挤占网格列并保持无障碍标签纯净 */}
+          <div className={FORM_GRID_2_CLASS}>
+            <div className={FIELD_CLASS}>
               <label htmlFor={fieldId("name")}>版本名称</label>
               <input
                 aria-describedby={
@@ -153,6 +175,7 @@ export function ModelProfileCreateDialog({
                 }
                 aria-invalid={Boolean(errors.name)}
                 autoComplete="off"
+                className={FIELD_INPUT_CLASS}
                 data-autofocus
                 id={fieldId("name")}
                 onChange={(event) => update("name", event.target.value)}
@@ -165,7 +188,7 @@ export function ModelProfileCreateDialog({
               />
             </div>
 
-            <div className="workspace-field">
+            <div className={FIELD_CLASS}>
               <label htmlFor={fieldId("model")}>模型标识</label>
               <input
                 aria-describedby={
@@ -173,6 +196,7 @@ export function ModelProfileCreateDialog({
                 }
                 aria-invalid={Boolean(errors.model)}
                 autoComplete="off"
+                className={FIELD_INPUT_CLASS}
                 id={fieldId("model")}
                 onChange={(event) => update("model", event.target.value)}
                 placeholder="服务端实际接收的 model"
@@ -185,7 +209,7 @@ export function ModelProfileCreateDialog({
             </div>
           </div>
 
-          <label className="workspace-field" htmlFor={fieldId("base_url")}>
+          <label className={FIELD_CLASS} htmlFor={fieldId("base_url")}>
             <span>HTTPS Base URL</span>
             <input
               aria-describedby={
@@ -195,6 +219,7 @@ export function ModelProfileCreateDialog({
               }
               aria-invalid={Boolean(errors.base_url)}
               autoComplete="url"
+              className={FIELD_INPUT_CLASS}
               id={fieldId("base_url")}
               onChange={(event) =>
                 update("base_url", event.target.value)
@@ -211,10 +236,7 @@ export function ModelProfileCreateDialog({
             id={fieldId("base_url-error")}
           />
 
-          <label
-            className="workspace-field"
-            htmlFor={fieldId("api_key")}
-          >
+          <label className={FIELD_CLASS} htmlFor={fieldId("api_key")}>
             <span>API Key</span>
             <input
               aria-describedby={
@@ -224,6 +246,7 @@ export function ModelProfileCreateDialog({
               }
               aria-invalid={Boolean(errors.api_key)}
               autoComplete="off"
+              className={FIELD_INPUT_CLASS}
               id={fieldId("api_key")}
               onChange={(event) =>
                 update("api_key", event.target.value)
@@ -241,14 +264,12 @@ export function ModelProfileCreateDialog({
             id={fieldId("api_key-error")}
           />
 
-          <div className="admin-form-grid">
-            <label
-              className="workspace-field"
-              htmlFor={fieldId("context")}
-            >
+          <div className={FORM_GRID_2_CLASS}>
+            <label className={FIELD_CLASS} htmlFor={fieldId("context")}>
               <span>上下文窗口 tokens</span>
               <input
                 aria-invalid={Boolean(errors.context_window_tokens)}
+                className={FIELD_INPUT_CLASS}
                 id={fieldId("context")}
                 inputMode="numeric"
                 max={CONTEXT_WINDOW_TOKEN_LIMIT_MAX}
@@ -263,13 +284,11 @@ export function ModelProfileCreateDialog({
                 value={values.context_window_tokens}
               />
             </label>
-            <label
-              className="workspace-field"
-              htmlFor={fieldId("max-output")}
-            >
+            <label className={FIELD_CLASS} htmlFor={fieldId("max-output")}>
               <span>最大输出 tokens</span>
               <input
                 aria-invalid={Boolean(errors.max_output_tokens)}
+                className={FIELD_INPUT_CLASS}
                 id={fieldId("max-output")}
                 inputMode="numeric"
                 max={OUTPUT_TOKEN_LIMIT_MAX}
@@ -290,12 +309,10 @@ export function ModelProfileCreateDialog({
             id={fieldId("tokens-error")}
           />
 
-          <label
-            className="workspace-field"
-            htmlFor={fieldId("tokenizer")}
-          >
+          <label className={FIELD_CLASS} htmlFor={fieldId("tokenizer")}>
             <span>Tokenizer 编码</span>
             <select
+              className={FIELD_SELECT_CLASS}
               id={fieldId("tokenizer")}
               onChange={(event) =>
                 update(
@@ -313,10 +330,11 @@ export function ModelProfileCreateDialog({
             </select>
           </label>
 
-          <div className="admin-check-grid">
-            <label className="workspace-checkbox">
+          <div className={CHECK_GRID_CLASS}>
+            <label className={CHECKBOX_LABEL_CLASS}>
               <input
                 checked={values.supports_stream}
+                className={CHECKBOX_INPUT_CLASS}
                 onChange={(event) =>
                   update("supports_stream", event.target.checked)
                 }
@@ -324,9 +342,10 @@ export function ModelProfileCreateDialog({
               />
               <span>支持流式输出</span>
             </label>
-            <label className="workspace-checkbox">
+            <label className={CHECKBOX_LABEL_CLASS}>
               <input
                 checked={values.supports_tools}
+                className={CHECKBOX_INPUT_CLASS}
                 onChange={(event) =>
                   update("supports_tools", event.target.checked)
                 }
@@ -334,9 +353,10 @@ export function ModelProfileCreateDialog({
               />
               <span>支持工具调用</span>
             </label>
-            <label className="workspace-checkbox">
+            <label className={CHECKBOX_LABEL_CLASS}>
               <input
                 checked={values.supports_parallel_tool_calls}
+                className={CHECKBOX_INPUT_CLASS}
                 disabled={!values.supports_tools}
                 onChange={(event) =>
                   update(
@@ -354,14 +374,15 @@ export function ModelProfileCreateDialog({
             id={fieldId("parallel-error")}
           />
 
-          <div className="admin-form-grid admin-form-grid--three">
+          <div className={FORM_GRID_3_CLASS}>
             <label
-              className="workspace-field"
+              className={FIELD_CLASS}
               htmlFor={fieldId("request-timeout")}
             >
               <span>请求超时（秒）</span>
               <input
                 aria-invalid={Boolean(errors.request_timeout_seconds)}
+                className={FIELD_INPUT_CLASS}
                 id={fieldId("request-timeout")}
                 max={3_600}
                 min={1}
@@ -376,12 +397,13 @@ export function ModelProfileCreateDialog({
               />
             </label>
             <label
-              className="workspace-field"
+              className={FIELD_CLASS}
               htmlFor={fieldId("execution-timeout")}
             >
               <span>执行超时（秒）</span>
               <input
                 aria-invalid={Boolean(errors.execution_timeout_seconds)}
+                className={FIELD_INPUT_CLASS}
                 id={fieldId("execution-timeout")}
                 max={3_600}
                 min={1}
@@ -395,13 +417,11 @@ export function ModelProfileCreateDialog({
                 value={values.execution_timeout_seconds}
               />
             </label>
-            <label
-              className="workspace-field"
-              htmlFor={fieldId("concurrency")}
-            >
+            <label className={FIELD_CLASS} htmlFor={fieldId("concurrency")}>
               <span>最大并发</span>
               <input
                 aria-invalid={Boolean(errors.max_concurrency)}
+                className={FIELD_INPUT_CLASS}
                 id={fieldId("concurrency")}
                 max={128}
                 min={1}
@@ -422,13 +442,11 @@ export function ModelProfileCreateDialog({
             id={fieldId("limits-error")}
           />
 
-          <label
-            className="workspace-field"
-            htmlFor={fieldId("temperature")}
-          >
+          <label className={FIELD_CLASS} htmlFor={fieldId("temperature")}>
             <span>temperature（可留空）</span>
             <input
               aria-invalid={Boolean(errors.temperature)}
+              className={FIELD_INPUT_CLASS}
               id={fieldId("temperature")}
               max={2}
               min={0}
@@ -448,7 +466,7 @@ export function ModelProfileCreateDialog({
         </fieldset>
 
         {mutation.isPending ? (
-          <p className="admin-form-status" role="status">
+          <p className={NOTICE_BRAND_CLASS} role="status">
             正在创建不可变模型版本…
           </p>
         ) : null}
@@ -505,38 +523,36 @@ export function DisableDefaultModelDialog({
       description="后端不会自动切换默认模型。"
       footer={
         <>
-          <button
-            className="button-quiet"
+          <Button
             disabled={mutation.isPending}
             onClick={onClose}
             type="button"
+            variant="outline"
           >
             取消
-          </button>
-          <button
-            className="button-danger"
+          </Button>
+          <Button
             disabled={!confirmed || mutation.isPending}
             onClick={() => void handleDisable()}
             type="button"
+            variant="danger"
           >
             {mutation.isPending ? "正在停用…" : "确认停用默认版本"}
-          </button>
+          </Button>
         </>
       }
       onClose={onClose}
       open={open}
       title="停用当前默认模型"
     >
-      <p className="confirm-copy">
+      <p className={CONFIRM_COPY_CLASS}>
         “{profile.name}”仍是默认模型。停用后，后端不会自动选择其他版本，
         新 Run 可能因没有可用默认模型而失败。
       </p>
-      <label
-        className="workspace-checkbox workspace-checkbox--danger"
-        htmlFor={checkboxId}
-      >
+      <label className={CHECKBOX_LABEL_CLASS} htmlFor={checkboxId}>
         <input
           checked={confirmed}
+          className={CHECKBOX_INPUT_DANGER_CLASS}
           disabled={mutation.isPending}
           id={checkboxId}
           onChange={(event) => setConfirmed(event.target.checked)}
@@ -635,33 +651,33 @@ export function CompressionPolicyDialog({
       description="保存会创建新的不可变策略版本；上下文压缩没有独立关闭开关。"
       footer={
         <>
-          <button
-            className="button-quiet"
+          <Button
             disabled={mutation.isPending}
             onClick={close}
             type="button"
+            variant="outline"
           >
             取消
-          </button>
-          <button
-            className="button-primary"
+          </Button>
+          <Button
             disabled={
               mutation.isPending || enabledProfiles.length === 0
             }
             form={formId}
             type="submit"
+            variant="primary"
           >
             {mutation.isPending ? "正在保存策略…" : "保存压缩策略"}
-          </button>
+          </Button>
         </>
       }
       onClose={close}
       open={open}
-      panelClassName="admin-modal"
+      panelClassName={MODAL_WIDTH_XL}
       title="配置上下文压缩"
     >
       <form
-        className="admin-form"
+        className={FORM_STACK_CLASS}
         id={formId}
         noValidate
         onSubmit={(event) => {
@@ -670,12 +686,12 @@ export function CompressionPolicyDialog({
         }}
       >
         {enabledProfiles.length === 0 ? (
-          <p className="admin-inline-notice" role="status">
+          <p className={NOTICE_WARNING_CLASS} role="status">
             当前没有已启用的模型版本，不能保存压缩策略。
           </p>
         ) : null}
         <label
-          className="workspace-field"
+          className={FIELD_CLASS}
           htmlFor={`${formId}-compression-model`}
         >
           <span>压缩模型</span>
@@ -688,6 +704,7 @@ export function CompressionPolicyDialog({
             aria-invalid={Boolean(
               errors.compression_model_profile_id,
             )}
+            className={FIELD_SELECT_CLASS}
             disabled={mutation.isPending}
             id={`${formId}-compression-model`}
             onChange={(event) =>
@@ -712,14 +729,15 @@ export function CompressionPolicyDialog({
           id={`${formId}-compression-model-error`}
         />
 
-        <div className="admin-form-grid admin-form-grid--three">
+        <div className={FORM_GRID_3_CLASS}>
           <label
-            className="workspace-field"
+            className={FIELD_CLASS}
             htmlFor={`${formId}-trigger-tokens`}
           >
             <span>触发 Token</span>
             <input
               aria-invalid={Boolean(errors.trigger_tokens)}
+              className={FIELD_INPUT_CLASS}
               disabled={mutation.isPending}
               id={`${formId}-trigger-tokens`}
               min={1}
@@ -732,12 +750,13 @@ export function CompressionPolicyDialog({
             />
           </label>
           <label
-            className="workspace-field"
+            className={FIELD_CLASS}
             htmlFor={`${formId}-recent-ratio`}
           >
             <span>近期原文比例</span>
             <input
               aria-invalid={Boolean(errors.recent_ratio)}
+              className={FIELD_INPUT_CLASS}
               disabled={mutation.isPending}
               id={`${formId}-recent-ratio`}
               max={0.999}
@@ -751,12 +770,13 @@ export function CompressionPolicyDialog({
             />
           </label>
           <label
-            className="workspace-field"
+            className={FIELD_CLASS}
             htmlFor={`${formId}-recent-token-cap`}
           >
             <span>近期原文 Token 上限</span>
             <input
               aria-invalid={Boolean(errors.recent_token_cap)}
+              className={FIELD_INPUT_CLASS}
               disabled={mutation.isPending}
               id={`${formId}-recent-token-cap`}
               min={1}
@@ -769,12 +789,13 @@ export function CompressionPolicyDialog({
             />
           </label>
           <label
-            className="workspace-field"
+            className={FIELD_CLASS}
             htmlFor={`${formId}-summary-ratio`}
           >
             <span>摘要比例</span>
             <input
               aria-invalid={Boolean(errors.summary_ratio)}
+              className={FIELD_INPUT_CLASS}
               disabled={mutation.isPending}
               id={`${formId}-summary-ratio`}
               max={0.999}
@@ -788,12 +809,13 @@ export function CompressionPolicyDialog({
             />
           </label>
           <label
-            className="workspace-field"
+            className={FIELD_CLASS}
             htmlFor={`${formId}-summary-token-cap`}
           >
             <span>摘要 Token 上限</span>
             <input
               aria-invalid={Boolean(errors.summary_token_cap)}
+              className={FIELD_INPUT_CLASS}
               disabled={mutation.isPending}
               id={`${formId}-summary-token-cap`}
               min={1}
@@ -806,11 +828,11 @@ export function CompressionPolicyDialog({
             />
           </label>
         </div>
-        <p className="admin-form-help">
+        <p className="text-xs leading-[1.65] text-text-tertiary">
           触发 Token 与两个上限必须为正整数；两个比例都必须大于 0
           且小于 1，并且比例之和必须小于 1。
         </p>
-        <p className="admin-form-help">
+        <p className="text-xs leading-[1.65] text-text-tertiary">
           派生近期原文预算：{formatTokenCount(derivedBudgets.recent)}
           {" · "}
           派生摘要预算：{formatTokenCount(derivedBudgets.summary)}
@@ -826,7 +848,7 @@ export function CompressionPolicyDialog({
           id={`${formId}-ratios-error`}
         />
         {mutation.isPending ? (
-          <p className="admin-form-status" role="status">
+          <p className={NOTICE_BRAND_CLASS} role="status">
             正在保存上下文压缩策略…
           </p>
         ) : null}

@@ -3,7 +3,29 @@ import { useSearchParams } from "react-router-dom";
 
 import { formatDateTime } from "../../shared/lib/format";
 import { parsePage } from "../../shared/lib/pagination";
-import { VisibilityBadge } from "../../shared/ui";
+import {
+  ADMIN_CARD_CLASS,
+  ADMIN_CARD_HEADING_CLASS,
+  ADMIN_CARD_LIST_CLASS,
+  ADMIN_CODE_VALUE_CLASS,
+  ADMIN_DATA_COUNT_CLASS,
+  ADMIN_DETAIL_GRID_CLASS,
+  ADMIN_DETAIL_WIDE_CLASS,
+  ADMIN_MUTED_CLASS,
+  ADMIN_SECTION_CLASS,
+  ADMIN_SECTION_HEADING_CLASS,
+  ADMIN_TITLE_LINE_CLASS,
+  Badge,
+  Button,
+  PAGE_DESC_CLASS,
+  PAGE_HEADING_CLASS,
+  PAGE_HEADING_COPY_CLASS,
+  PAGE_LOADING_CLASS,
+  PAGE_SHELL_CLASS,
+  PAGE_TITLE_CLASS,
+  VisibilityBadge,
+  cn,
+} from "../../shared/ui";
 import { EmptyState } from "../../shared/ui/EmptyState";
 import { ErrorBanner } from "../../shared/ui/ErrorBanner";
 import { Icon } from "../../shared/ui/Icons";
@@ -54,26 +76,26 @@ export function AdminMcpPage() {
   };
 
   return (
-    <div className="page-shell admin-page admin-mcp-page">
-      <header className="page-heading">
-        <div className="page-heading-copy">
-          <h1>MCP Server</h1>
-          <p className="page-description">
+    <div className={cn(PAGE_SHELL_CLASS, "min-w-0")}>
+      <header className={PAGE_HEADING_CLASS}>
+        <div className={PAGE_HEADING_COPY_CLASS}>
+          <h1 className={PAGE_TITLE_CLASS}>MCP Server</h1>
+          <p className={PAGE_DESC_CLASS}>
             管理企业 MCP 连接。创建和编辑都会由后端真实连接并发现工具，页面不模拟连接或发现结果。
           </p>
         </div>
-        <button
-          className="button-primary"
+        <Button
           onClick={() => setCreateOpen(true)}
           type="button"
+          variant="primary"
         >
           <Icon name="plus" size={14} />
           新建 MCP Server
-        </button>
+        </Button>
       </header>
 
       {servers.isPending ? (
-        <div className="page-loading" role="status">
+        <div className={PAGE_LOADING_CLASS} role="status">
           正在读取 MCP Server…
         </div>
       ) : servers.isError ? (
@@ -84,13 +106,13 @@ export function AdminMcpPage() {
       ) : servers.data.items.length === 0 && page === 1 ? (
         <EmptyState
           action={
-            <button
-              className="button-primary"
+            <Button
               onClick={() => setCreateOpen(true)}
               type="button"
+              variant="primary"
             >
               新建第一个 MCP Server
-            </button>
+            </Button>
           }
           description="新建时后端会连接远端 Server、发现工具并原子写入目录；失败不会创建占位配置。"
           icon="settings"
@@ -99,37 +121,36 @@ export function AdminMcpPage() {
       ) : (
         <section
           aria-labelledby="mcp-server-list-title"
-          className="admin-section"
+          className={ADMIN_SECTION_CLASS}
         >
-          <header className="admin-section-heading">
+          <header className={ADMIN_SECTION_HEADING_CLASS}>
             <div>
               <h2 id="mcp-server-list-title">Server 目录</h2>
             </div>
-            <span className="admin-data-count">
+            <span className={ADMIN_DATA_COUNT_CLASS}>
               后端返回 {servers.data.total} 个 Server
             </span>
           </header>
 
-          <ul className="admin-server-list">
+          <ul className={ADMIN_CARD_LIST_CLASS}>
             {servers.data.items.map((server) => (
-              <li className="admin-server-card" key={server.id}>
-                <div className="admin-card-heading">
-                  <div>
-                    <div className="admin-title-line">
+              <li className={ADMIN_CARD_CLASS} key={server.id}>
+                <div className={ADMIN_CARD_HEADING_CLASS}>
+                  <div className="min-w-0">
+                    <div className={ADMIN_TITLE_LINE_CLASS}>
                       <h3>{server.name}</h3>
-                      <span className="admin-status-badge is-accent">
+                      <Badge className="rounded-full" variant="brand">
                         {mcpTransportLabel(server)}
-                      </span>
-                      <span className="admin-status-badge">
+                      </Badge>
+                      <Badge className="rounded-full" variant="neutral">
                         v{server.config_version}
-                      </span>
-                      <span
-                        className={`admin-status-badge${
-                          server.enabled ? " is-success" : " is-muted"
-                        }`}
+                      </Badge>
+                      <Badge
+                        className="rounded-full"
+                        variant={server.enabled ? "success" : "neutral"}
                       >
                         {server.enabled ? "已启用" : "已停用"}
-                      </span>
+                      </Badge>
                       <VisibilityBadge
                         departmentName={
                           server.visibility_scope === "department"
@@ -139,33 +160,38 @@ export function AdminMcpPage() {
                         scope={server.visibility_scope}
                       />
                     </div>
-                    <p className="admin-muted">
+                    <p className={ADMIN_MUTED_CLASS}>
                       {discoveredAtLabel(server)}
                     </p>
                   </div>
-                  <button
+                  <Button
                     aria-label={`编辑 MCP Server：${server.name}`}
-                    className="button-quiet"
                     onClick={() => setEditServerId(server.id)}
+                    size="sm"
                     type="button"
+                    variant="outline"
                   >
                     <Icon name="edit" size={14} />
                     编辑
-                  </button>
+                  </Button>
                 </div>
 
-                <div className="admin-server-config">
-                  <span>连接配置</span>
-                  <code>{mcpConfigSummary(server)}</code>
+                <div className="mt-3.5 flex min-w-0 flex-col items-start gap-1 rounded-[9px] border border-border-default bg-subtle px-3 py-[11px] sm:flex-row sm:items-baseline sm:gap-2.5">
+                  <span className="shrink-0 text-xs text-text-tertiary">
+                    连接配置
+                  </span>
+                  <code className="min-w-0 font-mono text-xs leading-[1.6] text-text-primary [overflow-wrap:anywhere]">
+                    {mcpConfigSummary(server)}
+                  </code>
                 </div>
-                <dl className="admin-detail-grid">
-                  <div className="admin-detail-wide">
+                <dl className={ADMIN_DETAIL_GRID_CLASS}>
+                  <div className={ADMIN_DETAIL_WIDE_CLASS}>
                     <dt>秘密名称与保存状态</dt>
                     <dd>{secretMetadataLabel(server)}</dd>
                   </div>
                   <div>
                     <dt>创建者</dt>
-                    <dd className="admin-code-value">
+                    <dd className={ADMIN_CODE_VALUE_CLASS}>
                       {server.created_by ?? "后端未返回"}
                     </dd>
                   </div>
@@ -186,7 +212,12 @@ export function AdminMcpPage() {
                     </dd>
                   </div>
                 </dl>
-                <p className="admin-card-footnote">
+                <p
+                  className={cn(
+                    ADMIN_MUTED_CLASS,
+                    "mt-3 border-t border-dashed border-border-default pt-2.5",
+                  )}
+                >
                   后端未提供“重新发现”接口；编辑并完整替换配置时会重新连接并发现工具。
                 </p>
               </li>

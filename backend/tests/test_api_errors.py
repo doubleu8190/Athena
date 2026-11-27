@@ -128,7 +128,7 @@ from domain.system_prompt import (
     SystemPromptNotFoundError,
     SystemPromptUnavailableError,
 )
-from infrastructure.feishu import FeishuError
+from infrastructure.feishu import FeishuError, FeishuProtocolError, FeishuUpstreamError
 
 
 @pytest.mark.parametrize(
@@ -162,6 +162,8 @@ from infrastructure.feishu import FeishuError
         (LastSuperAdminProtectedError(), 409, "last_super_admin_protected"),
         (FeishuNotEnabledError(), 409, "feishu_not_enabled"),
         (FeishuError("secret token leak"), 502, "feishu_sync_failed"),
+        (FeishuUpstreamError("upstream timeout"), 502, "feishu_sync_failed"),
+        (FeishuProtocolError("malformed payload"), 502, "feishu_sync_failed"),
         # Access
         (AccessPermissionDeniedError("department_scope_denied"), 403, "department_scope_denied"),
         (

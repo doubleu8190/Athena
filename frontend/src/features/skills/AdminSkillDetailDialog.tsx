@@ -4,9 +4,21 @@ import { useEffect, useId, useMemo, useRef, useState } from "react";
 import { formatBytes, formatDateTime } from "../../shared/lib/format";
 import { newRequestId } from "../../shared/lib/requestId";
 import {
+  ADMIN_MUTED_CLASS,
   Badge,
   Button,
+  CHECK_GRID_CLASS,
+  CHECKBOX_INPUT_CLASS,
+  CHECKBOX_LABEL_CLASS,
+  CONFIRM_COPY_CLASS,
+  FIELD_CLASS,
+  FIELD_INPUT_CLASS,
   InlineAlert,
+  MODAL_WIDTH_DETAIL,
+  MODAL_WIDTH_XL,
+  NOTICE_SUCCESS_CLASS,
+  NOTICE_WARNING_CLASS,
+  PAGE_LOADING_CLASS,
   Select,
   SelectContent,
   SelectItem,
@@ -116,41 +128,52 @@ function mergeVersions(
   ).sort((left, right) => right.ordinal - left.ordinal);
 }
 
+const DETAIL_PANEL_CLASS =
+  "min-w-0 rounded-[11px] border border-border-default bg-canvas p-4";
+const DETAIL_PANEL_HEADER_CLASS =
+  "mb-3 flex flex-col items-start justify-between gap-4 border-b border-border-subtle pb-2.5 min-[721px]:flex-row [&_h3]:text-base [&_h3]:leading-[1.3] [&_h3]:font-semibold [&_h3]:text-text-primary [&_p]:mt-[3px] [&_p]:text-xs [&_p]:leading-[1.6] [&_p]:text-text-tertiary [&_code]:font-mono [&_code]:text-xs [&_code]:[overflow-wrap:anywhere]";
+const VERSION_ITEM_LIST_CLASS = "m-0 flex list-none flex-col gap-[7px] p-0";
+const VERSION_ITEM_ROW_CLASS =
+  "flex min-w-0 items-start justify-between gap-3 rounded-lg border border-border-default bg-canvas px-2.5 py-[9px]";
+
 function DependencyBadge({ check }: { check: DependencyCheck | null }) {
   const satisfied = dependencySatisfied(check);
   return (
-    <span
-      className={`admin-status-badge ${
-        satisfied ? " is-success" : " is-warning"
-      }`}
+    <Badge
+      className="rounded-full"
+      variant={satisfied ? "success" : "warning"}
     >
       {satisfied ? "依赖满足" : "依赖未满足"}
-    </span>
+    </Badge>
   );
 }
 
 function DependencyDetails({ check }: { check: DependencyCheck | null }) {
   if (!check || check.items.length === 0) {
-    return <p className="admin-muted">该版本未声明 Python 依赖。</p>;
+    return <p className={ADMIN_MUTED_CLASS}>该版本未声明 Python 依赖。</p>;
   }
   return (
-    <div className="admin-skill-dependency-list">
-      <p>
+    <div>
+      <p className="mb-[9px] text-xs text-text-tertiary">
         Python {check.python_version} · {check.python_implementation} ·
         检查于 {formatDateTime(check.checked_at)}
       </p>
-      <ul>
+      <ul className={VERSION_ITEM_LIST_CLASS}>
         {check.items.map((item) => (
-          <li key={item.requirement}>
-            <span
-              className={`admin-status-badge ${
-                item.satisfied ? " is-success" : " is-warning"
-              }`}
+          <li
+            className="grid min-w-0 grid-cols-1 items-start gap-3 rounded-lg border border-border-default bg-canvas px-2.5 py-[9px] min-[721px]:grid-cols-[auto_minmax(0,1fr)_auto] min-[721px]:items-center"
+            key={item.requirement}
+          >
+            <Badge
+              className="rounded-full"
+              variant={item.satisfied ? "success" : "warning"}
             >
               {item.satisfied ? "已满足" : "缺失或不符"}
-            </span>
-            <code>{item.requirement}</code>
-            <span>
+            </Badge>
+            <code className="font-mono text-xs text-text-primary [overflow-wrap:anywhere]">
+              {item.requirement}
+            </code>
+            <span className="text-xs leading-[1.55] text-text-tertiary [overflow-wrap:anywhere]">
               {item.marker_applies
                 ? item.installed_version
                   ? `已安装 ${item.installed_version}`
@@ -166,13 +189,17 @@ function DependencyDetails({ check }: { check: DependencyCheck | null }) {
 
 function VersionContent({ version }: { version: SkillVersion }) {
   return (
-    <div className="admin-skill-version-content">
-      <div className="admin-skill-version-heading">
-        <div>
-          <strong>{versionLabel(version)}</strong>
-          <p>
+    <div className="flex min-w-0 flex-col gap-3.5 [&_section>h4]:mb-2 [&_section>h4]:text-[13px] [&_section>h4]:font-bold [&_section>h4]:text-text-primary">
+      <div className="flex min-w-0 items-start justify-between gap-4 border-b border-border-subtle pb-[11px]">
+        <div className="min-w-0">
+          <strong className="text-base leading-[1.3] text-text-primary">
+            {versionLabel(version)}
+          </strong>
+          <p className="mt-[3px] text-xs leading-[1.6] text-text-tertiary [overflow-wrap:anywhere]">
             {version.slug} · SHA-256{" "}
-            <code>{version.package_sha256.slice(0, 16)}…</code>
+            <code className="[overflow-wrap:anywhere]">
+              {version.package_sha256.slice(0, 16)}…
+            </code>
           </p>
         </div>
         <DependencyBadge check={version.dependency_check} />
@@ -180,30 +207,34 @@ function VersionContent({ version }: { version: SkillVersion }) {
 
       <section aria-labelledby={`guide-${version.id}`}>
         <h4 id={`guide-${version.id}`}>操作指南</h4>
-        <div className="admin-skill-guide">
+        <div className="max-h-[360px] overflow-auto rounded-[9px] border border-border-default bg-subtle p-3.5">
           {version.guide ? (
             <MarkdownContent text={version.guide} />
           ) : (
-            <p className="admin-muted">该版本指南正文为空。</p>
+            <p className={ADMIN_MUTED_CLASS}>该版本指南正文为空。</p>
           )}
         </div>
       </section>
 
       {/* 将文件清单、登记脚本与依赖检查编排为紧凑卡片网格，缩短详情区纵向滚动 */}
-      <div className="admin-skill-version-meta-grid">
+      <div className="grid min-w-0 grid-cols-1 gap-3 md:grid-cols-2 [&>section]:min-w-0 [&>section]:rounded-[9px] [&>section]:border [&>section]:border-border-default [&>section]:bg-subtle [&>section]:p-3">
         <section aria-labelledby={`files-${version.id}`}>
           <h4 id={`files-${version.id}`}>文件清单</h4>
-          <ul className="admin-skill-file-list">
+          <ul className={VERSION_ITEM_LIST_CLASS}>
             {version.files.map((file) => (
-              <li key={file.path}>
-                <span>
-                  <strong>{file.path}</strong>
-                  <small>
+              <li className={VERSION_ITEM_ROW_CLASS} key={file.path}>
+                <span className="min-w-0">
+                  <strong className="block text-xs text-text-primary [overflow-wrap:anywhere]">
+                    {file.path}
+                  </strong>
+                  <small className="text-xs leading-[1.55] text-text-tertiary [overflow-wrap:anywhere]">
                     {file.text ? "UTF-8 文本" : "二进制资源"} ·{" "}
                     {formatBytes(file.size_bytes)}
                   </small>
                 </span>
-                <code>{file.sha256.slice(0, 12)}…</code>
+                <code className="max-w-full shrink-0 font-mono text-xs text-text-secondary [overflow-wrap:anywhere]">
+                  {file.sha256.slice(0, 12)}…
+                </code>
               </li>
             ))}
           </ul>
@@ -212,14 +243,23 @@ function VersionContent({ version }: { version: SkillVersion }) {
         <section aria-labelledby={`scripts-${version.id}`}>
           <h4 id={`scripts-${version.id}`}>登记脚本</h4>
           {version.scripts.length === 0 ? (
-            <p className="admin-muted">该版本未登记可执行脚本。</p>
+            <p className={ADMIN_MUTED_CLASS}>该版本未登记可执行脚本。</p>
           ) : (
-            <ul className="admin-skill-script-list">
+            <ul className={VERSION_ITEM_LIST_CLASS}>
               {version.scripts.map((script) => (
-                <li key={script.path}>
-                  <strong>{script.label}</strong>
-                  <code>{script.path}</code>
-                  <p>{script.purpose}</p>
+                <li
+                  className={cn(VERSION_ITEM_ROW_CLASS, "flex-col")}
+                  key={script.path}
+                >
+                  <strong className="block text-xs text-text-primary [overflow-wrap:anywhere]">
+                    {script.label}
+                  </strong>
+                  <code className="max-w-full shrink-0 font-mono text-xs text-text-secondary [overflow-wrap:anywhere]">
+                    {script.path}
+                  </code>
+                  <p className="mt-0.5 text-xs leading-[1.55] text-text-tertiary [overflow-wrap:anywhere]">
+                    {script.purpose}
+                  </p>
                 </li>
               ))}
             </ul>
@@ -228,7 +268,7 @@ function VersionContent({ version }: { version: SkillVersion }) {
 
         <section
           aria-labelledby={`dependencies-${version.id}`}
-          className="admin-skill-version-dependencies"
+          className="md:col-span-2"
         >
           <h4 id={`dependencies-${version.id}`}>依赖检查</h4>
           <DependencyDetails check={version.dependency_check} />
@@ -296,17 +336,25 @@ function VersionUpload({
   return (
     <section
       aria-labelledby={`${inputId}-title`}
-      className="admin-skill-version-upload"
+      className={cn(
+        DETAIL_PANEL_CLASS,
+        "grid grid-cols-1 items-end gap-x-3 gap-y-[11px] min-[721px]:grid-cols-[minmax(0,1fr)_minmax(220px,0.9fr)_auto]",
+      )}
     >
       {/* 标题与说明独占首行，第二行按文件选择器、标签输入、上传按钮三列底部对齐 */}
-      <div className="admin-skill-version-upload-header">
-        <h4 id={`${inputId}-title`}>上传完整新版本</h4>
-        <p>
+      <div className="col-span-full self-start">
+        <h4
+          className="text-base leading-[1.3] font-semibold text-text-primary"
+          id={`${inputId}-title`}
+        >
+          上传完整新版本
+        </h4>
+        <p className="mt-[3px] text-xs leading-[1.6] text-text-tertiary">
           新包 slug 必须为 {slug}。上传只新增不可变版本，不自动切换。
         </p>
       </div>
       {/* 复用通用文件选择器并启用按钮触发模式，保持顶部标签对齐与跳过隐藏 input 的键盘焦点序 */}
-      <div className="workspace-field admin-skill-file-picker-field">
+      <div className={FIELD_CLASS}>
         <label htmlFor={inputId}>选择新版本 ZIP</label>
         <WorkspaceFilePicker
           accept=".zip,application/zip"
@@ -326,9 +374,10 @@ function VersionUpload({
           triggerLabel="选择 ZIP 文件"
         />
       </div>
-      <label className="workspace-field" htmlFor={labelId}>
+      <label className={FIELD_CLASS} htmlFor={labelId}>
         <span>版本标签（可选）</span>
         <input
+          className={cn(FIELD_INPUT_CLASS, "min-h-[38px]")}
           disabled={disabled || mutation.isPending}
           id={labelId}
           maxLength={64}
@@ -342,21 +391,32 @@ function VersionUpload({
           value={label}
         />
       </label>
-      <button
-        className="button-quiet admin-skill-upload-submit"
+      <Button
+        className="h-[38px]"
         disabled={disabled || mutation.isPending || !file}
         onClick={() => void upload()}
         type="button"
+        variant="outline"
       >
         <Icon name="upload" size={14} />
         {mutation.isPending ? "正在检查并上传…" : "上传新版本"}
-      </button>
+      </Button>
       {notice ? (
-        <p className="admin-skill-inline-success" role="status">
+        <p
+          className={cn(
+            NOTICE_SUCCESS_CLASS,
+            "col-span-full min-w-0 [overflow-wrap:anywhere]",
+          )}
+          role="status"
+        >
           {notice}
         </p>
       ) : null}
-      {error ? <ErrorBanner message={error} /> : null}
+      {error ? (
+        <div className="col-span-full min-w-0">
+          <ErrorBanner message={error} />
+        </div>
+      ) : null}
     </section>
   );
 }
@@ -743,29 +803,28 @@ export function AdminSkillDetailDialog({
       footer={
         <>
           {isDepartmentSkill ? (
-            <button
-              className="button-danger-outline"
+            <Button
               disabled={pending || hasRevisionConflict}
               onClick={() => {
                 setDeleteError(null);
                 setDeleteDialogOpen(true);
               }}
               type="button"
+              variant="danger-outline"
             >
               <Icon name="trash" size={14} />
               删除部门技能
-            </button>
+            </Button>
           ) : null}
-          <button
-            className="button-quiet"
+          <Button
             disabled={pending}
             onClick={close}
             type="button"
+            variant="outline"
           >
             关闭
-          </button>
-          <button
-            className="button-primary"
+          </Button>
+          <Button
             disabled={
               pending ||
               !form ||
@@ -774,20 +833,21 @@ export function AdminSkillDetailDialog({
             }
             onClick={() => void save()}
             type="button"
+            variant="primary"
           >
             {update.isPending ? "正在保存配置…" : "保存当前配置"}
-          </button>
+          </Button>
         </>
       }
       onClose={close}
       open={open}
-      panelClassName="admin-modal admin-skill-detail-modal"
+      panelClassName={MODAL_WIDTH_DETAIL}
       title={
         detail.data ? `技能：${detail.data.name}` : "技能详情"
       }
     >
       {detail.isPending && !detail.data ? (
-        <div className="page-loading admin-dialog-loading" role="status">
+        <div className={PAGE_LOADING_CLASS} role="status">
           正在读取技能版本与检查结果…
         </div>
       ) : detail.isError && !detail.data ? (
@@ -796,12 +856,12 @@ export function AdminSkillDetailDialog({
           onRetry={() => void detail.refetch()}
         />
       ) : detail.data && form ? (
-        <div className="admin-skill-detail">
+        <div className="flex min-w-0 flex-col gap-[18px]">
           <section
             aria-labelledby="skill-config-title"
-            className="admin-skill-config"
+            className={DETAIL_PANEL_CLASS}
           >
-            <header>
+            <header className={DETAIL_PANEL_HEADER_CLASS}>
               <div>
                 <div className="flex flex-wrap items-center gap-2">
                   <h3 id="skill-config-title">当前发布配置</h3>
@@ -835,29 +895,40 @@ export function AdminSkillDetailDialog({
             </header>
 
             {hasRevisionConflict ? (
-              <div className="admin-inline-warning" role="alert">
+              <div
+                className={cn(
+                  NOTICE_WARNING_CLASS,
+                  "mb-3 flex flex-col items-stretch justify-between gap-3 font-medium min-[721px]:flex-row min-[721px]:items-center",
+                )}
+                role="alert"
+              >
                 <p>
                   {conflictMessage ??
                     `服务端配置已更新到 revision ${detail.data.revision}，当前${isDirty ? "草稿" : "编辑基线"}仍保留在 revision ${baseline?.revision ?? "未知"}，保存已锁定。`}
                 </p>
-                <button
-                  className="button-quiet"
+                <Button
                   disabled={pending}
                   onClick={() => void reloadLatestConfiguration()}
+                  size="sm"
                   type="button"
+                  variant="outline"
                 >
                   重新载入服务端最新配置
-                </button>
+                </Button>
               </div>
             ) : null}
 
             {/* 桌面端采用左右双栏网格：左侧版本选择，右侧启停与审批开关 */}
-            <div className="admin-skill-config-grid">
-              <div className="workspace-field">
-                <div className="admin-skill-field-label">
-                  <span>当前版本</span>
+            <div className="grid min-w-0 grid-cols-1 items-start gap-x-4 gap-y-3 min-[721px]:grid-cols-[minmax(0,1.15fr)_minmax(0,1fr)]">
+              <div className={FIELD_CLASS}>
+                <div className="flex items-center justify-between gap-2">
+                  <span className="text-[13px] font-semibold text-text-primary">
+                    当前版本
+                  </span>
                   {isVersionDirty ? (
-                    <span className="admin-skill-dirty-badge">未保存变更</span>
+                    <Badge className="rounded-full" variant="brand">
+                      未保存变更
+                    </Badge>
                   ) : null}
                 </div>
                 {/* 使用统一 Radix Select，并在展开态向旧 Modal 声明 Escape 归属权以避免误关外层详情弹窗 */}
@@ -922,10 +993,16 @@ export function AdminSkillDetailDialog({
                 </small>
               </div>
 
-              <div className="admin-check-grid">
-                <label className="workspace-checkbox">
+              <div
+                className={cn(
+                  CHECK_GRID_CLASS,
+                  "flex-col gap-2.5 min-[721px]:mt-[26px]",
+                )}
+              >
+                <label className={CHECKBOX_LABEL_CLASS}>
                   <input
                     checked={form.enabled}
+                    className={CHECKBOX_INPUT_CLASS}
                     // 已启用但当前环境依赖失效时仍必须允许管理员关闭技能。
                     disabled={pending || (!canEnable && !form.enabled)}
                     onChange={(event) => {
@@ -939,9 +1016,10 @@ export function AdminSkillDetailDialog({
                   />
                   <span>向普通用户启用该技能</span>
                 </label>
-                <label className="workspace-checkbox">
+                <label className={CHECKBOX_LABEL_CLASS}>
                   <input
                     checked={form.scriptRequiresApproval}
+                    className={CHECKBOX_INPUT_CLASS}
                     disabled={pending}
                     onChange={(event) =>
                       setForm({
@@ -1072,27 +1150,35 @@ export function AdminSkillDetailDialog({
               />
             ) : null}
             {!canEnable ? (
-              <p className="admin-inline-warning">
+              <p className={cn(NOTICE_WARNING_CLASS, "mt-3 font-semibold")}>
                 所选版本依赖未满足，后端将拒绝启用；可切换至检查通过的版本，或由部署管理员补齐统一 Python 环境。
               </p>
             ) : null}
             {currentVersionOutsideKnownList &&
             currentVersionDetail.isError ? (
-              <ErrorBanner
-                message="当前版本详情加载失败，暂时不能保存或预览该版本。"
-                onRetry={() => void currentVersionDetail.refetch()}
-              />
+              <div className="mt-3">
+                <ErrorBanner
+                  message="当前版本详情加载失败，暂时不能保存或预览该版本。"
+                  onRetry={() => void currentVersionDetail.refetch()}
+                />
+              </div>
             ) : null}
             {selectedVersionNeedsDetail &&
             selectedVersionDetail.isError ? (
-              <ErrorBanner
-                message="所选版本详情加载失败，暂时不能保存或预览该版本。"
-                onRetry={() => void selectedVersionDetail.refetch()}
-              />
+              <div className="mt-3">
+                <ErrorBanner
+                  message="所选版本详情加载失败，暂时不能保存或预览该版本。"
+                  onRetry={() => void selectedVersionDetail.refetch()}
+                />
+              </div>
             ) : null}
-            {requestError ? <ErrorBanner message={requestError} /> : null}
+            {requestError ? (
+              <div className="mt-3">
+                <ErrorBanner message={requestError} />
+              </div>
+            ) : null}
             {notice ? (
-              <p className="admin-skill-inline-success" role="status">
+              <p className={cn(NOTICE_SUCCESS_CLASS, "mt-3")} role="status">
                 {notice}
               </p>
             ) : null}
@@ -1145,26 +1231,25 @@ export function AdminSkillDetailDialog({
 
           <section
             aria-labelledby="skill-versions-title"
-            className="admin-skill-versions"
+            className={DETAIL_PANEL_CLASS}
           >
-            <header>
+            <header className={DETAIL_PANEL_HEADER_CLASS}>
               <div>
                 <h3 id="skill-versions-title">不可变版本历史</h3>
                 <p>选择上方表单中的版本可预览对应指南、资源与检查结果。</p>
               </div>
             </header>
             {/* 桌面端采用 Master-Detail 左右分栏：左侧分页与版本列表，右侧版本详情 */}
-            <div className="admin-skill-versions-layout">
-              <div className="admin-skill-versions-sidebar">
+            <div className="grid min-w-0 grid-cols-1 items-start gap-4 md:grid-cols-[minmax(260px,276px)_minmax(0,1fr)]">
+              <div className="flex min-w-0 flex-col gap-2.5">
                 <div
                   aria-label="版本历史分页"
-                  className="admin-skill-version-pagination"
+                  className="flex flex-col flex-wrap items-stretch gap-x-2 gap-y-1.5 text-xs text-text-tertiary min-[721px]:flex-row min-[721px]:items-center"
                 >
-                  <span>
+                  <span className="min-[721px]:basis-full">
                     共 {versionPage.data?.total ?? versions.length} 个版本
                   </span>
-                  <button
-                    className="button-quiet"
+                  <Button
                     disabled={
                       versionPage.isFetching || versionPageNumber <= 1
                     }
@@ -1173,10 +1258,12 @@ export function AdminSkillDetailDialog({
                         Math.max(1, current - 1),
                       )
                     }
+                    size="xs"
                     type="button"
+                    variant="outline"
                   >
                     上一页版本
-                  </button>
+                  </Button>
                   <span>
                     第 {versionPage.data?.page ?? versionPageNumber} /{" "}
                     {Math.max(
@@ -1188,8 +1275,7 @@ export function AdminSkillDetailDialog({
                     )}{" "}
                     页
                   </span>
-                  <button
-                    className="button-quiet"
+                  <Button
                     disabled={
                       versionPage.isFetching ||
                       !versionPage.data ||
@@ -1201,13 +1287,15 @@ export function AdminSkillDetailDialog({
                     onClick={() =>
                       setVersionPageNumber((current) => current + 1)
                     }
+                    size="xs"
                     type="button"
+                    variant="outline"
                   >
                     下一页版本
-                  </button>
+                  </Button>
                 </div>
                 {versionPage.isPending && versions.length === 0 ? (
-                  <p className="admin-muted" role="status">
+                  <p className={ADMIN_MUTED_CLASS} role="status">
                     正在读取不可变版本历史…
                   </p>
                 ) : versionPage.isError ? (
@@ -1216,55 +1304,56 @@ export function AdminSkillDetailDialog({
                     onRetry={() => void versionPage.refetch()}
                   />
                 ) : versions.length === 0 ? (
-                  <p className="admin-muted">该技能尚无不可变版本。</p>
+                  <p className={ADMIN_MUTED_CLASS}>该技能尚无不可变版本。</p>
                 ) : null}
-                <ol className="admin-skill-version-list">
-                  {versions.map((version) => (
-                    <li
-                      className={
-                        version.id === form.currentVersionId
-                          ? "is-selected"
-                          : ""
-                      }
-                      key={version.id}
-                    >
-                      <button
-                        className="admin-skill-version-tab"
-                        disabled={pending}
-                        onClick={() => {
-                          setForm({
-                            ...form,
-                            currentVersionId: version.id,
-                          });
-                          setRequestError(null);
-                          setNotice(null);
-                        }}
-                        type="button"
-                      >
-                        <span>
-                          <strong>{versionLabel(version)}</strong>
-                          <small>
-                            {formatDateTime(version.created_at)} ·{" "}
-                            {version.files.length} 个文件
-                          </small>
-                        </span>
-                        <DependencyBadge
-                          check={version.dependency_check}
-                        />
-                      </button>
-                    </li>
-                  ))}
+                <ol className="m-0 flex max-h-[260px] min-w-0 list-none flex-col gap-[7px] overflow-y-auto pr-0.5 pl-0 md:max-h-[520px]">
+                  {versions.map((version) => {
+                    const isSelected = version.id === form.currentVersionId;
+                    return (
+                      <li className="shrink-0" key={version.id}>
+                        <button
+                          className={cn(
+                            "flex w-full min-w-0 items-start justify-between gap-2 rounded-[9px] border px-[11px] py-2.5 text-left transition-colors hover:border-brand-border hover:bg-brand-subtle",
+                            isSelected
+                              ? "border-brand-border bg-brand-subtle shadow-[inset_3px_0_0_var(--brand-hover)]"
+                              : "border-border-default bg-canvas",
+                          )}
+                          disabled={pending}
+                          onClick={() => {
+                            setForm({
+                              ...form,
+                              currentVersionId: version.id,
+                            });
+                            setRequestError(null);
+                            setNotice(null);
+                          }}
+                          type="button"
+                        >
+                          <span className="flex min-w-0 flex-col gap-[3px]">
+                            <strong className="text-xs text-text-primary [overflow-wrap:anywhere]">
+                              {versionLabel(version)}
+                            </strong>
+                            <small className="text-xs text-text-tertiary [overflow-wrap:anywhere]">
+                              {formatDateTime(version.created_at)} ·{" "}
+                              {version.files.length} 个文件
+                            </small>
+                          </span>
+                          <DependencyBadge check={version.dependency_check} />
+                        </button>
+                      </li>
+                    );
+                  })}
                 </ol>
               </div>
-              <div className="admin-skill-versions-detail">
+              <div className="min-w-0 border-t border-border-subtle pt-3.5 md:border-t-0 md:border-l md:pt-0 md:pl-4">
                 {selectedVersion ? (
                   <VersionContent version={selectedVersion} />
                 ) : versionDetailPending ? (
-                  <p className="admin-muted" role="status">
+                  <p className={ADMIN_MUTED_CLASS} role="status">
                     正在读取所选版本的指南、资源和依赖检查…
                   </p>
                 ) : (
-                  <p className="admin-muted">请选择一个版本查看内容。</p>
+                  <p className={ADMIN_MUTED_CLASS}>请选择一个版本查看内容。</p>
                 )}
               </div>
             </div>
@@ -1279,22 +1368,22 @@ export function AdminSkillDetailDialog({
           description="删除后后续新对话将不再展示该技能，历史运行记录不受影响。"
           footer={
             <>
-              <button
-                className="button-quiet"
+              <Button
                 disabled={deleteSkillMutation.isPending}
                 onClick={() => setDeleteDialogOpen(false)}
                 type="button"
+                variant="outline"
               >
                 取消
-              </button>
-              <button
-                className="button-danger"
+              </Button>
+              <Button
                 disabled={deleteSkillMutation.isPending}
                 onClick={() => void handleConfirmDeleteDepartmentSkill()}
                 type="button"
+                variant="danger"
               >
                 {deleteSkillMutation.isPending ? "正在删除…" : "确认删除"}
-              </button>
+              </Button>
             </>
           }
           onClose={() => {
@@ -1303,10 +1392,10 @@ export function AdminSkillDetailDialog({
             }
           }}
           open={deleteDialogOpen}
-          panelClassName="admin-modal"
+          panelClassName={MODAL_WIDTH_XL}
           title="删除部门技能"
         >
-          <p className="confirm-copy">
+          <p className={CONFIRM_COPY_CLASS}>
             确定软删除部门技能「{detail.data.name}」（slug:{" "}
             <code>{detail.data.slug}</code>）吗？
           </p>

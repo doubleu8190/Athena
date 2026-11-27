@@ -14,8 +14,8 @@ from domain.llm.model.profile import (
 )
 
 
-class CompressionPolicyRepository(Protocol):
-    """管理员配置和读取不可变压缩策略。"""
+class ModelProfileRepository(Protocol):
+    """管理员模型配置版本、默认指向与压缩策略持久化能力。"""
 
     async def get_current_compression_policy(self) -> CompressionPolicyVersion | None: ...
 
@@ -24,10 +24,6 @@ class CompressionPolicyRepository(Protocol):
     async def set_compression_policy(
         self, actor: AuthContext, value: CompressionPolicyInput
     ) -> CompressionPolicyVersion: ...
-
-
-class ModelProfileRepository(CompressionPolicyRepository, Protocol):
-    """管理员模型配置版本、默认指向与压缩策略持久化能力。"""
 
     async def create(self, actor: AuthContext, value: ModelProfileInput) -> ModelProfileVersion: ...
 
@@ -60,4 +56,4 @@ class ModelProfileRepository(CompressionPolicyRepository, Protocol):
     async def get_runtime(self, profile_id: str) -> RuntimeModelProfile | None: ...
 
 
-__all__ = ["CompressionPolicyRepository", "ModelProfileRepository"]
+__all__ = ["ModelProfileRepository"]

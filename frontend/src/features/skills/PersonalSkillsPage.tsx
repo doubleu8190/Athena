@@ -2,7 +2,21 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 
 import { formatDateTime } from "../../shared/lib/format";
-import { Tabs, TabsList, TabsTrigger } from "../../shared/ui";
+import {
+  Badge,
+  Button,
+  InlineAlert,
+  PAGE_DESC_CLASS,
+  PAGE_HEADING_CLASS,
+  PAGE_HEADING_COPY_CLASS,
+  PAGE_LOADING_CLASS,
+  PAGE_SHELL_CLASS,
+  PAGE_TITLE_CLASS,
+  Tabs,
+  TabsList,
+  TabsTrigger,
+  cn,
+} from "../../shared/ui";
 import { EmptyState } from "../../shared/ui/EmptyState";
 import { ErrorBanner } from "../../shared/ui/ErrorBanner";
 import { Icon } from "../../shared/ui/Icons";
@@ -67,6 +81,15 @@ function skillSourceCopy(scope: SkillScope): string {
   }
 }
 
+const SKILL_GRID_CLASS =
+  "m-0 grid list-none grid-cols-1 gap-[13px] p-0 min-[821px]:grid-cols-2";
+const SKILL_CARD_CLASS =
+  "flex min-w-0 flex-col gap-3.5 rounded-xl border border-border-default bg-canvas p-4 shadow-xs sm:px-[19px] sm:py-[18px]";
+const SKILL_LIST_HEADER_CLASS =
+  "mb-3 flex flex-col items-start justify-between gap-1.5 border-b border-border-subtle px-0.5 pb-3 sm:flex-row sm:items-end sm:gap-[18px] [&_h2]:mt-[3px] [&_h2]:text-lg [&_h2]:font-semibold [&_h2]:text-text-primary";
+const SKILL_TITLE_LINE_CLASS =
+  "flex min-w-0 flex-wrap items-center gap-[7px] [&_h3]:min-w-0 [&_h3]:text-base [&_h3]:font-semibold [&_h3]:text-text-primary [&_h3]:[overflow-wrap:anywhere]";
+
 function AvailableSkillCard({
   departmentName,
   skill,
@@ -76,16 +99,20 @@ function AvailableSkillCard({
 }) {
   const scope = skillScope(skill);
   return (
-    <li className="available-skill-card">
-      <div className="available-skill-heading">
-        <div className="personal-skill-title-line">
+    <li className={SKILL_CARD_CLASS}>
+      <div className="min-w-0">
+        <div className={SKILL_TITLE_LINE_CLASS}>
           <h3>{skill.name}</h3>
           <SkillScopeBadge departmentName={departmentName} scope={scope} />
-          <span className="available-skill-status">后续对话可用</span>
+          <Badge className="rounded-full" variant="success">
+            后续对话可用
+          </Badge>
         </div>
-        <p>{skill.description || "未填写描述"}</p>
+        <p className="mt-2 text-[13px] leading-[1.65] text-text-secondary [overflow-wrap:anywhere]">
+          {skill.description || "未填写描述"}
+        </p>
       </div>
-      <dl className="available-skill-meta">
+      <dl className="mt-auto grid grid-cols-1 gap-2 border-t border-dashed border-border-default pt-3 sm:grid-cols-3 sm:gap-[9px] [&>div]:min-w-0 [&_dt]:text-[11px] [&_dt]:font-semibold [&_dt]:text-text-tertiary [&_dd]:mt-1 [&_dd]:flex [&_dd]:min-w-0 [&_dd]:flex-wrap [&_dd]:items-center [&_dd]:gap-[5px] [&_dd]:text-xs [&_dd]:leading-[1.5] [&_dd]:text-text-primary [&_dd]:[overflow-wrap:anywhere]">
         <div>
           <dt>来源</dt>
           <dd>
@@ -149,22 +176,22 @@ export function PersonalSkillsPage() {
   };
 
   return (
-    <div className="page-shell personal-skills-page">
-      <header className="page-heading">
-        <div className="page-heading-copy">
-          <h1>技能库</h1>
-          <p className="page-description">
+    <div className={cn(PAGE_SHELL_CLASS, "max-w-[1160px]")}>
+      <header className={PAGE_HEADING_CLASS}>
+        <div className={PAGE_HEADING_COPY_CLASS}>
+          <h1 className={PAGE_TITLE_CLASS}>技能库</h1>
+          <p className={PAGE_DESC_CLASS}>
             企业与部门技能由对应管理员发布，个人技能仅本人可见。启用表示允许后续对话按任务使用，并不等于每次对话都会执行。
           </p>
         </div>
-        <button
-          className="button-primary"
+        <Button
           onClick={() => createActionRef.current?.()}
           type="button"
+          variant="primary"
         >
           <Icon name="plus" size={14} />
           新建个人技能
-        </button>
+        </Button>
       </header>
 
       <Tabs onValueChange={handleViewChange} value={view} variant="underline">
@@ -292,14 +319,13 @@ function SkillsLibraryView({
   return (
     <>
       {successMessage ? (
-        <div
+        <InlineAlert
           aria-live="polite"
-          className="personal-skill-success"
-          role="status"
+          className="mb-3.5 text-[13px]"
+          variant="success"
         >
-          <Icon name="spark" size={16} />
-          <span>{successMessage}</span>
-        </div>
+          {successMessage}
+        </InlineAlert>
       ) : null}
       {actionError ? (
         <ErrorBanner
@@ -310,7 +336,7 @@ function SkillsLibraryView({
       ) : null}
 
       {activeSkills.isPending ? (
-        <div className="page-loading" role="status">
+        <div className={PAGE_LOADING_CLASS} role="status">
           {view === "mine" ? "正在读取我的技能…" : "正在读取可用技能…"}
         </div>
       ) : activeSkills.isError ? (
@@ -322,14 +348,10 @@ function SkillsLibraryView({
         activeSkills.data.length === 0 ? (
           <EmptyState
             action={
-              <button
-                className="button-primary"
-                onClick={openCreateEditor}
-                type="button"
-              >
+              <Button onClick={openCreateEditor} type="button" variant="primary">
                 <Icon name="plus" size={14} />
                 创建个人技能
-              </button>
+              </Button>
             }
             description="管理员发布全公司或部门技能，或你在“我的技能”中启用个人技能后，会出现在这里。当前对话仍可继续。"
             icon="spark"
@@ -338,9 +360,9 @@ function SkillsLibraryView({
         ) : (
           <section
             aria-labelledby="available-skill-list-title"
-            className="personal-skill-section"
+            className="mt-2"
           >
-            <header className="personal-skill-list-header">
+            <header className={SKILL_LIST_HEADER_CLASS}>
               <div>
                 <h2 id="available-skill-list-title">可用技能</h2>
               </div>
@@ -360,23 +382,25 @@ function SkillsLibraryView({
                     ))}
                   </TabsList>
                 </Tabs>
-                <span>共 {filteredAvailableSkills.length} 个</span>
+                <span className="shrink-0 text-xs text-text-tertiary">
+                  共 {filteredAvailableSkills.length} 个
+                </span>
               </div>
             </header>
-            <p className="skills-library-availability-note">
+            <p className="-mt-0.5 mb-3 flex items-start gap-[7px] text-xs leading-[1.65] text-text-tertiary [&>svg]:mt-px [&>svg]:shrink-0 [&>svg]:text-brand-hover">
               <Icon name="shield" size={15} />
               这里展示全公司技能、所属部门共享技能与你已启用的个人技能；可用只表示后续对话可以按任务使用。
             </p>
             {filteredAvailableSkills.length === 0 ? (
               <EmptyState
                 action={
-                  <button
-                    className="button-quiet"
+                  <Button
                     onClick={() => setScopeFilter("all")}
                     type="button"
+                    variant="outline"
                   >
                     查看全部可用技能
-                  </button>
+                  </Button>
                 }
                 compact
                 description="当前筛选条件下没有可用技能，可切换回「全部」查看。"
@@ -384,7 +408,7 @@ function SkillsLibraryView({
                 title="该范围内暂无可用技能"
               />
             ) : (
-              <ul className="available-skill-list">
+              <ul className={SKILL_GRID_CLASS}>
                 {filteredAvailableSkills.map((skill) => (
                   // 可用技能是运行目录投影，仅供查看；个人启停与删除只在“我的技能”中操作。
                   <AvailableSkillCard
@@ -403,54 +427,50 @@ function SkillsLibraryView({
       ) : activeSkills.data.length === 0 ? (
         <EmptyState
           action={
-            <button
-              className="button-primary"
-              onClick={openCreateEditor}
-              type="button"
-            >
+            <Button onClick={openCreateEditor} type="button" variant="primary">
               <Icon name="plus" size={14} />
               新建第一个个人技能
-            </button>
+            </Button>
           }
           description="在线编写方法，或导入一个 Markdown 文件。保存后仅你本人可以使用。"
           icon="spark"
           title="还没有个人技能"
         />
       ) : (
-        <section
-          aria-labelledby="personal-skill-list-title"
-          className="personal-skill-section"
-        >
-          <header className="personal-skill-list-header">
+        <section aria-labelledby="personal-skill-list-title" className="mt-2">
+          <header className={SKILL_LIST_HEADER_CLASS}>
             <div>
               <h2 id="personal-skill-list-title">我的技能</h2>
             </div>
-            <span>共 {activeSkills.data.length} 个</span>
+            <span className="shrink-0 text-xs text-text-tertiary">
+              共 {activeSkills.data.length} 个
+            </span>
           </header>
 
-          <ul className="personal-skill-list">
+          <ul className={SKILL_GRID_CLASS}>
             {activeSkills.data.map((skill) => {
               const toggling =
                 toggleMutation.isPending &&
                 toggleMutation.variables?.skillId === skill.id;
               return (
-                <li className="personal-skill-card" key={skill.id}>
-                  <div className="personal-skill-card-heading">
-                    <div className="personal-skill-title-line">
+                <li className={SKILL_CARD_CLASS} key={skill.id}>
+                  <div className="min-w-0">
+                    <div className={SKILL_TITLE_LINE_CLASS}>
                       <h3>{skill.name}</h3>
                       <SkillScopeBadge scope="personal" />
-                      <span
-                        className={`personal-skill-status${
-                          skill.enabled ? " is-enabled" : ""
-                        }`}
+                      <Badge
+                        className="rounded-full"
+                        variant={skill.enabled ? "success" : "neutral"}
                       >
                         {skill.enabled ? "已启用" : "已停用"}
-                      </span>
+                      </Badge>
                     </div>
-                    <p>{skill.description || "未填写描述"}</p>
+                    <p className="mt-2 text-[13px] leading-[1.65] text-text-secondary [overflow-wrap:anywhere]">
+                      {skill.description || "未填写描述"}
+                    </p>
                   </div>
 
-                  <dl className="personal-skill-meta">
+                  <dl className="m-0 grid grid-cols-1 gap-2 border-y border-dashed border-border-default py-3 sm:grid-cols-2 sm:gap-2.5 [&>div]:min-w-0 [&_dt]:text-[11px] [&_dt]:font-semibold [&_dt]:text-text-tertiary [&_dd]:mt-1 [&_dd]:text-xs [&_dd]:leading-[1.5] [&_dd]:text-text-primary [&_dd]:[overflow-wrap:anywhere]">
                     <div>
                       <dt>当前版本</dt>
                       <dd>
@@ -465,10 +485,9 @@ function SkillsLibraryView({
                     </div>
                   </dl>
 
-                  <div className="personal-skill-actions">
-                    <button
+                  <div className="mt-auto flex min-w-0 flex-wrap gap-2 [&>button]:flex-[1_1_100%] sm:[&>button]:flex-[1_1_94px]">
+                    <Button
                       aria-label={`编辑个人技能：${skill.name}`}
-                      className="button-quiet"
                       onClick={() => {
                         setActionError(null);
                         setSuccessMessage(null);
@@ -478,17 +497,20 @@ function SkillsLibraryView({
                           skillId: skill.id,
                         });
                       }}
+                      size="sm"
                       type="button"
+                      variant="outline"
                     >
                       <Icon name="edit" size={14} />
                       编辑
-                    </button>
-                    <button
+                    </Button>
+                    <Button
                       aria-label={`${skill.enabled ? "停用" : "启用"}个人技能：${skill.name}`}
-                      className="button-quiet"
                       disabled={toggling}
                       onClick={() => void handleToggle(skill)}
+                      size="sm"
                       type="button"
+                      variant="outline"
                     >
                       <Icon
                         name={skill.enabled ? "eye-off" : "eye"}
@@ -499,19 +521,20 @@ function SkillsLibraryView({
                         : skill.enabled
                           ? "停用"
                           : "启用"}
-                    </button>
-                    <button
+                    </Button>
+                    <Button
                       aria-label={`删除个人技能：${skill.name}`}
-                      className="button-danger-outline"
                       onClick={() => {
                         setDeleteError(null);
                         setDeleteTarget(skill);
                       }}
+                      size="sm"
                       type="button"
+                      variant="danger-outline"
                     >
                       <Icon name="trash" size={14} />
                       删除
-                    </button>
+                    </Button>
                   </div>
                 </li>
               );
@@ -533,22 +556,22 @@ function SkillsLibraryView({
         description="删除后不能从当前页面恢复。"
         footer={
           <>
-            <button
-              className="button-quiet"
+            <Button
               disabled={deleteMutation.isPending}
               onClick={() => setDeleteTarget(null)}
               type="button"
+              variant="outline"
             >
               取消
-            </button>
-            <button
-              className="button-danger"
+            </Button>
+            <Button
               disabled={deleteMutation.isPending}
               onClick={() => void handleDelete()}
               type="button"
+              variant="danger"
             >
               {deleteMutation.isPending ? "正在删除…" : "确认删除"}
-            </button>
+            </Button>
           </>
         }
         onClose={() => {
@@ -559,7 +582,7 @@ function SkillsLibraryView({
         open={Boolean(deleteTarget)}
         title={deleteTarget ? `删除「${deleteTarget.name}」？` : "删除个人技能？"}
       >
-        <div className="personal-skill-delete-copy">
+        <div className="flex items-start gap-2.5 text-[13px] leading-[1.7] text-text-secondary [&>svg]:mt-0.5 [&>svg]:shrink-0 [&>svg]:text-danger">
           <Icon name="shield" size={18} />
           <p>
             后续对话将不再使用该技能，进行中的任务和历史记录不受影响。删除后，当前技能目录会立即刷新。

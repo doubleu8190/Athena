@@ -1,7 +1,17 @@
 import { useEffect, useId, useMemo, useRef, useState } from "react";
 
 import { newRequestId } from "../../shared/lib/requestId";
-import { InlineAlert, VisibilityBadge } from "../../shared/ui";
+import {
+  Button,
+  FIELD_CLASS,
+  FIELD_INPUT_CLASS,
+  FIELD_SELECT_CLASS,
+  FORM_STACK_CLASS,
+  InlineAlert,
+  MODAL_WIDTH_LG,
+  NOTICE_WARNING_CLASS,
+  VisibilityBadge,
+} from "../../shared/ui";
 import { ErrorBanner } from "../../shared/ui/ErrorBanner";
 import { Modal } from "../../shared/ui/Modal";
 import { WorkspaceFilePicker } from "../../shared/ui/WorkspaceFilePicker";
@@ -157,31 +167,31 @@ export function SkillPackageDialog({
       description="仅首发导入会创建技能身份；重复 slug 由后端拒绝，不会覆盖已有技能。"
       footer={
         <>
-          <button
-            className="button-quiet"
+          <Button
             disabled={mutation.isPending}
             onClick={close}
             type="button"
+            variant="outline"
           >
             取消
-          </button>
-          <button
-            className="button-primary"
+          </Button>
+          <Button
             disabled={mutation.isPending || !file || noManagedDepartments}
             form={formId}
             type="submit"
+            variant="primary"
           >
             {mutation.isPending ? "正在检查并导入…" : "导入并查看检查结果"}
-          </button>
+          </Button>
         </>
       }
       onClose={close}
       open={open}
-      panelClassName="admin-modal admin-skill-import-modal"
+      panelClassName={MODAL_WIDTH_LG}
       title="导入技能包"
     >
       <form
-        className="admin-form"
+        className={FORM_STACK_CLASS}
         id={formId}
         noValidate
         onSubmit={(event) => {
@@ -189,7 +199,7 @@ export function SkillPackageDialog({
           void handleSubmit();
         }}
       >
-        <div className="admin-inline-notice">
+        <div className={NOTICE_WARNING_CLASS}>
           ZIP 根目录必须包含 <code>SKILL.md</code>，可选目录为{" "}
           <code>scripts/</code>、<code>templates/</code> 和{" "}
           <code>references/</code>。后端会校验路径安全、解压边界、依赖与脚本
@@ -198,18 +208,21 @@ export function SkillPackageDialog({
 
         {/* 可见范围与归属部门选择：部门管理员固定部门级，超级管理员可选全公司或部门共享 */}
         {deptAdmin ? (
-          <div className="workspace-field">
+          <div className={FIELD_CLASS}>
             <span>发布范围</span>
             <div className="flex items-center gap-2 pt-0.5">
               <VisibilityBadge scope="department" />
-              <small>部门管理员仅可导入所属管辖部门的部门共享技能。</small>
+              <small className="text-xs text-text-tertiary">
+                部门管理员仅可导入所属管辖部门的部门共享技能。
+              </small>
             </div>
           </div>
         ) : (
-          <label className="workspace-field" htmlFor={scopeId}>
+          <label className={FIELD_CLASS} htmlFor={scopeId}>
             <span>发布范围</span>
             <select
               aria-label="发布范围"
+              className={FIELD_SELECT_CLASS}
               disabled={mutation.isPending}
               id={scopeId}
               onChange={(event) => {
@@ -234,7 +247,7 @@ export function SkillPackageDialog({
         )}
 
         {scope === "department" ? (
-          <div className="workspace-field">
+          <div className={FIELD_CLASS}>
             {hasDepartmentControl ? (
               <label htmlFor={departmentIdInput}>归属部门</label>
             ) : (
@@ -251,6 +264,7 @@ export function SkillPackageDialog({
                 aria-describedby={departmentError ? deptErrorId : undefined}
                 aria-invalid={departmentError ? true : undefined}
                 aria-label="归属部门"
+                className={FIELD_SELECT_CLASS}
                 disabled={mutation.isPending}
                 id={departmentIdInput}
                 onChange={(event) => {
@@ -276,6 +290,7 @@ export function SkillPackageDialog({
                   aria-invalid={departmentError ? true : undefined}
                   aria-label="归属部门"
                   autoComplete="off"
+                  className={FIELD_INPUT_CLASS}
                   disabled={mutation.isPending}
                   id={departmentIdInput}
                   onChange={(event) => {
@@ -293,6 +308,7 @@ export function SkillPackageDialog({
                 aria-describedby={departmentError ? deptErrorId : undefined}
                 aria-invalid={departmentError ? true : undefined}
                 aria-label="归属部门"
+                className={FIELD_SELECT_CLASS}
                 disabled={mutation.isPending}
                 id={departmentIdInput}
                 onChange={(event) => {
@@ -318,7 +334,7 @@ export function SkillPackageDialog({
           </div>
         ) : null}
 
-        <div className="workspace-field">
+        <div className={FIELD_CLASS}>
           <span>技能 ZIP</span>
           <WorkspaceFilePicker
             accept=".zip,application/zip"

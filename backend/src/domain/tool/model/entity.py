@@ -179,6 +179,14 @@ class AdminToolDefinition(PublicToolDefinition):
     parameter_labels: Mapping[str, str] = field(default_factory=dict)
 
 
+@dataclass(frozen=True, slots=True)
+class ToolPage[ToolItem]:
+    """工具目录的一页结果及总条目数。"""
+
+    items: tuple[ToolItem, ...]
+    total: int
+
+
 __all__ = [
     "AdminToolDefinition",
     "MAX_APPROVAL_SUMMARY_TEMPLATE_LENGTH",
@@ -191,6 +199,7 @@ __all__ = [
     "PublicToolDefinition",
     "ToolDefinition",
     "ToolMetadataPatch",
+    "ToolPage",
     "validate_approval_summary_template",
     "validate_parameter_labels",
     "validate_tool_display_name",

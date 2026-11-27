@@ -31,14 +31,18 @@ TEST_PASSWORD = "long-enough-password"
 
 
 class FakePasswordHasher(PasswordHasher):
-    """快速确定性密码哈希器。"""
+    """快速、可观测的确定性密码哈希器。"""
 
     dummy_hash = "fake:dummy"
+
+    def __init__(self) -> None:
+        self.verify_calls: list[tuple[str, str]] = []
 
     def hash_password(self, password: str) -> str:
         return f"fake:{password}"
 
     def verify_password(self, password: str, password_hash: str) -> bool:
+        self.verify_calls.append((password, password_hash))
         return password_hash != self.dummy_hash and password_hash == f"fake:{password}"
 
 

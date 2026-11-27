@@ -2,7 +2,20 @@ import { useEffect, useId, useRef, useState } from "react";
 
 import { formatDateTime } from "../../shared/lib/format";
 import { newRequestId } from "../../shared/lib/requestId";
-import { MarkdownSplitEditor } from "../../shared/ui";
+import {
+  Button,
+  CHECKBOX_INPUT_DANGER_CLASS,
+  CHECKBOX_LABEL_CLASS,
+  CONFIRM_COPY_CLASS,
+  FIELD_CLASS,
+  FIELD_INPUT_CLASS,
+  FORM_STACK_CLASS,
+  MODAL_WIDTH_2XL,
+  MODAL_WIDTH_XL,
+  MarkdownSplitEditor,
+  NOTICE_BRAND_CLASS,
+  cn,
+} from "../../shared/ui";
 import { ErrorBanner } from "../../shared/ui/ErrorBanner";
 import { EmptyState } from "../../shared/ui/EmptyState";
 import { Modal } from "../../shared/ui/Modal";
@@ -263,19 +276,19 @@ export function KnowledgeIngestDialog({
       }
       footer={
         <>
-          <button
-            className="button-quiet"
+          <Button
             disabled={pending}
             onClick={close}
             type="button"
+            variant="outline"
           >
             取消
-          </button>
-          <button
-            className="button-primary"
+          </Button>
+          <Button
             disabled={pending}
             form={formId}
             type="submit"
+            variant="primary"
           >
             {pending
               ? replacing
@@ -284,18 +297,16 @@ export function KnowledgeIngestDialog({
               : replacing
                 ? "提交新版本"
                 : "添加资料"}
-          </button>
+          </Button>
         </>
       }
       onClose={close}
       open={open}
-      panelClassName={
-        mode === "text" ? "knowledge-ingest-split-modal" : undefined
-      }
+      panelClassName={mode === "text" ? MODAL_WIDTH_2XL : undefined}
       title={replacing ? "添加文档新版本" : "添加资料"}
     >
       <form
-        className="knowledge-form"
+        className={FORM_STACK_CLASS}
         id={formId}
         onSubmit={(event) => {
           event.preventDefault();
@@ -303,18 +314,24 @@ export function KnowledgeIngestDialog({
         }}
       >
         {replacing && document ? (
-          <p className="knowledge-form-note">
+          <p
+            className={cn(
+              NOTICE_BRAND_CLASS,
+              "block text-text-secondary",
+            )}
+          >
             文档：<strong>{document.title}</strong>
           </p>
         ) : null}
 
         <div
           aria-label="资料提交方式"
-          className="knowledge-mode-switch"
+          className="grid grid-cols-1 gap-1 rounded-[9px] border border-border-default bg-subtle p-1 min-[421px]:grid-cols-2"
           role="group"
         >
           <button
             aria-pressed={mode === "upload"}
+            className="min-h-[34px] rounded-[7px] text-[13px] font-semibold text-text-secondary transition-colors aria-[pressed=true]:bg-canvas aria-[pressed=true]:text-brand aria-[pressed=true]:shadow-xs"
             disabled={pending}
             onClick={() => selectMode("upload")}
             type="button"
@@ -323,6 +340,7 @@ export function KnowledgeIngestDialog({
           </button>
           <button
             aria-pressed={mode === "text"}
+            className="min-h-[34px] rounded-[7px] text-[13px] font-semibold text-text-secondary transition-colors aria-[pressed=true]:bg-canvas aria-[pressed=true]:text-brand aria-[pressed=true]:shadow-xs"
             disabled={pending}
             onClick={() => selectMode("text")}
             type="button"
@@ -332,13 +350,14 @@ export function KnowledgeIngestDialog({
         </div>
 
         {!replacing ? (
-          <label className="workspace-field" htmlFor={`${formId}-title`}>
+          <label className={FIELD_CLASS} htmlFor={`${formId}-title`}>
             <span>文档标题</span>
             <input
               aria-label="文档标题"
               aria-describedby={titleError ? titleErrorId : undefined}
               aria-invalid={titleError ? true : undefined}
               autoComplete="off"
+              className={FIELD_INPUT_CLASS}
               data-autofocus
               disabled={pending}
               id={`${formId}-title`}
@@ -361,7 +380,7 @@ export function KnowledgeIngestDialog({
         ) : null}
 
         {mode === "upload" ? (
-          <div className="workspace-field">
+          <div className={FIELD_CLASS}>
             <span>{replacing ? "新版本文件" : "文件"}</span>
             <WorkspaceFilePicker
               accept={KNOWLEDGE_FILE_ACCEPT}
@@ -385,7 +404,7 @@ export function KnowledgeIngestDialog({
             </small>
           </div>
         ) : (
-          <div className="workspace-field">
+          <div className={FIELD_CLASS}>
             <label htmlFor={`${formId}-text`}>文本内容</label>
             <MarkdownSplitEditor
               disabled={pending}
@@ -417,7 +436,7 @@ export function KnowledgeIngestDialog({
           </p>
         ) : null}
         {pending ? (
-          <p className="knowledge-form-status" role="status">
+          <p className={NOTICE_BRAND_CLASS} role="status">
             正在向后端提交资料，请勿重复操作。
           </p>
         ) : null}
@@ -491,22 +510,22 @@ export function RenameKnowledgeDocumentDialog({
       closeDisabled={mutation.isPending}
       footer={
         <>
-          <button
-            className="button-quiet"
+          <Button
             disabled={mutation.isPending}
             onClick={close}
             type="button"
+            variant="outline"
           >
             取消
-          </button>
-          <button
-            className="button-primary"
+          </Button>
+          <Button
             disabled={mutation.isPending}
             form={formId}
             type="submit"
+            variant="primary"
           >
             {mutation.isPending ? "正在保存…" : "保存标题"}
-          </button>
+          </Button>
         </>
       }
       onClose={close}
@@ -520,13 +539,14 @@ export function RenameKnowledgeDocumentDialog({
           void handleSubmit();
         }}
       >
-        <label className="workspace-field" htmlFor={`${formId}-title`}>
+        <label className={FIELD_CLASS} htmlFor={`${formId}-title`}>
           <span>文档标题</span>
           <input
             aria-label="文档标题"
             aria-describedby={validationError ? errorId : undefined}
             aria-invalid={Boolean(validationError)}
             autoComplete="off"
+            className={FIELD_INPUT_CLASS}
             data-autofocus
             id={`${formId}-title`}
             onChange={(event) => {
@@ -603,38 +623,36 @@ export function DeleteKnowledgeDocumentDialog({
       description="文档版本和检索片段将不再可访问。"
       footer={
         <>
-          <button
-            className="button-quiet"
+          <Button
             data-autofocus
             disabled={mutation.isPending}
             onClick={close}
             type="button"
+            variant="outline"
           >
             取消
-          </button>
-          <button
-            className="button-danger"
+          </Button>
+          <Button
             disabled={!confirmed || mutation.isPending}
             onClick={() => void handleDelete()}
             type="button"
+            variant="danger"
           >
             {mutation.isPending ? "正在删除…" : "删除文档"}
-          </button>
+          </Button>
         </>
       }
       onClose={close}
       open={open}
       title="删除文档"
     >
-      <p className="confirm-copy">
+      <p className={CONFIRM_COPY_CLASS}>
         确定删除“{document.title}”吗？删除后无法继续检索或下载其来源。
       </p>
-      <label
-        className="workspace-checkbox workspace-checkbox--danger"
-        htmlFor={checkboxId}
-      >
+      <label className={CHECKBOX_LABEL_CLASS} htmlFor={checkboxId}>
         <input
           checked={confirmed}
+          className={CHECKBOX_INPUT_DANGER_CLASS}
           id={checkboxId}
           onChange={(event) => setConfirmed(event.target.checked)}
           type="checkbox"
@@ -669,11 +687,13 @@ function VersionRow({
   version: KnowledgeVersion;
 }) {
   return (
-    <article className="knowledge-version-row">
-      <div className="knowledge-version-heading">
-        <div>
-          <strong>版本 {formatDateTime(version.created_at)}</strong>
-          <span>
+    <article className="rounded-[10px] border border-border-default bg-canvas p-3">
+      <div className="flex flex-col items-start justify-between gap-3.5 min-[701px]:flex-row">
+        <div className="flex min-w-0 flex-col gap-[3px]">
+          <strong className="text-xs text-text-primary">
+            版本 {formatDateTime(version.created_at)}
+          </strong>
+          <span className="text-xs text-text-tertiary">
             {version.completed_at
               ? `完成于 ${formatDateTime(version.completed_at)}`
               : "尚未完成"}
@@ -681,7 +701,7 @@ function VersionRow({
         </div>
         <KnowledgeStateBadge state={version.state} />
       </div>
-      <dl className="knowledge-version-meta">
+      <dl className="mt-2.5 flex gap-6 [&_dt]:font-mono [&_dt]:text-xs [&_dt]:tracking-[0.06em] [&_dt]:text-text-tertiary [&_dt]:uppercase [&_dd]:mt-[3px] [&_dd]:font-mono [&_dd]:text-xs [&_dd]:text-text-secondary">
         <div>
           <dt>检索片段</dt>
           <dd>{version.state === "ready" ? version.chunk_count : "—"}</dd>
@@ -692,19 +712,21 @@ function VersionRow({
         </div>
       </dl>
       {version.error_code ? (
-        <p className="knowledge-version-error" role="alert">
+        <p className="mt-[9px] text-xs leading-[1.6] text-danger" role="alert">
           {versionErrorMessage(version.error_code)}
-          <code>{version.error_code}</code>
+          <code className="ml-[7px] inline-block font-mono text-xs text-text-tertiary">
+            {version.error_code}
+          </code>
         </p>
       ) : null}
       {version.warnings.length > 0 ? (
-        <ul className="knowledge-warning-list">
+        <ul className="mt-2 list-disc pl-[17px] text-xs leading-[1.6] text-warning">
           {version.warnings.map((warning) => (
             <li key={warning}>{knowledgeWarningLabel(warning)}</li>
           ))}
         </ul>
       ) : null}
-      <div className="knowledge-version-actions">
+      <div className="mt-[9px] flex flex-wrap items-center justify-start gap-2 min-[701px]:justify-end">
         <KnowledgeSourceButton
           baseId={baseId}
           compact
@@ -712,13 +734,14 @@ function VersionRow({
           versionId={version.id}
         />
         {canRetry && version.state === "failed" ? (
-          <button
-            className="button-quiet"
+          <Button
             onClick={() => retry(version.id)}
+            size="sm"
             type="button"
+            variant="outline"
           >
             重试此版本
-          </button>
+          </Button>
         ) : null}
       </div>
     </article>
@@ -748,17 +771,17 @@ export function VersionHistoryDialog({
     <Modal
       description="版本按后端返回时间倒序排列，来源下载仍经过鉴权接口。"
       footer={
-        <button className="button-quiet" onClick={onClose} type="button">
+        <Button onClick={onClose} type="button" variant="outline">
           关闭
-        </button>
+        </Button>
       }
       onClose={onClose}
       open={open}
-      panelClassName="knowledge-version-dialog"
+      panelClassName={MODAL_WIDTH_XL}
       title="版本历史"
     >
       {versions.isPending ? (
-        <p className="knowledge-form-status" role="status">
+        <p className={NOTICE_BRAND_CLASS} role="status">
           正在读取版本…
         </p>
       ) : versions.isError ? (
@@ -774,7 +797,7 @@ export function VersionHistoryDialog({
           title="暂无版本"
         />
       ) : (
-        <div className="knowledge-version-list">
+        <div className="flex flex-col gap-[9px]">
           {versions.data.map((version) => (
             <VersionRow
               baseId={baseId}
@@ -788,12 +811,12 @@ export function VersionHistoryDialog({
         </div>
       )}
       {retryMutation.isPending ? (
-        <p className="knowledge-form-status" role="status">
+        <p className={NOTICE_BRAND_CLASS} role="status">
           正在重新排队失败版本…
         </p>
       ) : null}
       {retryMutation.isSuccess ? (
-        <p className="knowledge-form-status" role="status">
+        <p className={NOTICE_BRAND_CLASS} role="status">
           版本已重新排队，状态会自动刷新。
         </p>
       ) : null}

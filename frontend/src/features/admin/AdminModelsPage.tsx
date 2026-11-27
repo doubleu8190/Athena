@@ -1,7 +1,31 @@
 import { useState } from "react";
 
 import { formatDateTime } from "../../shared/lib/format";
-import { Badge } from "../../shared/ui";
+import {
+  ADMIN_CARD_ACTIONS_CLASS,
+  ADMIN_CARD_CLASS,
+  ADMIN_CARD_HEADING_CLASS,
+  ADMIN_CARD_LIST_CLASS,
+  ADMIN_CODE_LINE_CLASS,
+  ADMIN_CODE_VALUE_CLASS,
+  ADMIN_DATA_COUNT_CLASS,
+  ADMIN_DETAIL_GRID_CLASS,
+  ADMIN_DETAIL_WIDE_CLASS,
+  ADMIN_MUTED_CLASS,
+  ADMIN_SECTION_CLASS,
+  ADMIN_SECTION_HEADING_CLASS,
+  ADMIN_TITLE_LINE_CLASS,
+  Badge,
+  Button,
+  NOTICE_WARNING_CLASS,
+  PAGE_DESC_CLASS,
+  PAGE_HEADING_CLASS,
+  PAGE_HEADING_COPY_CLASS,
+  PAGE_LOADING_CLASS,
+  PAGE_SHELL_CLASS,
+  PAGE_TITLE_CLASS,
+  cn,
+} from "../../shared/ui";
 import { EmptyState } from "../../shared/ui/EmptyState";
 import { ErrorBanner } from "../../shared/ui/ErrorBanner";
 import { Icon } from "../../shared/ui/Icons";
@@ -34,14 +58,17 @@ const MODEL_PROFILE_PAGE_SIZE = 5;
 function ModelCapabilityList({ profile }: { profile: ModelProfile }) {
   const capabilities = modelCapabilities(profile);
   if (capabilities.length === 0) {
-    return <span className="admin-muted">未声明流式或工具能力</span>;
+    return <span className={ADMIN_MUTED_CLASS}>未声明流式或工具能力</span>;
   }
   return (
-    <div className="admin-tag-list" aria-label="模型能力">
+    <div
+      aria-label="模型能力"
+      className="flex shrink-0 flex-wrap justify-start gap-1 self-start sm:justify-end"
+    >
       {capabilities.map((capability) => (
-        <span className="admin-tag" key={capability}>
+        <Badge className="rounded-full" key={capability} variant="neutral">
           {capability}
-        </span>
+        </Badge>
       ))}
     </div>
   );
@@ -120,26 +147,26 @@ export function AdminModelsPage() {
   };
 
   return (
-    <div className="page-shell admin-page admin-models-page">
-      <header className="page-heading">
-        <div className="page-heading-copy">
-          <h1>模型与压缩策略</h1>
-          <p className="page-description">
+    <div className={cn(PAGE_SHELL_CLASS, "min-w-0")}>
+      <header className={PAGE_HEADING_CLASS}>
+        <div className={PAGE_HEADING_COPY_CLASS}>
+          <h1 className={PAGE_TITLE_CLASS}>模型与压缩策略</h1>
+          <p className={PAGE_DESC_CLASS}>
             管理模型配置、默认对话路由与上下文压缩策略。页面只展示后端安全投影，凭据不回显明文值。
           </p>
         </div>
-        <button
-          className="button-primary"
+        <Button
           onClick={() => setCreateOpen(true)}
           type="button"
+          variant="primary"
         >
           <Icon name="plus" size={14} />
           创建模型版本
-        </button>
+        </Button>
       </header>
 
       {actionError ? (
-        <div className="admin-page-alert">
+        <div className="mb-4">
           <ErrorBanner
             message={actionError}
             onRetry={() => {
@@ -153,21 +180,21 @@ export function AdminModelsPage() {
 
       <section
         aria-labelledby="model-profile-list-title"
-        className="admin-section"
+        className={ADMIN_SECTION_CLASS}
       >
-        <header className="admin-section-heading">
+        <header className={ADMIN_SECTION_HEADING_CLASS}>
           <div>
             <h2 id="model-profile-list-title">模型版本</h2>
           </div>
           {profiles.isSuccess ? (
-            <span className="admin-data-count">
+            <span className={ADMIN_DATA_COUNT_CLASS}>
               共 {profiles.data.items.length} 个版本
             </span>
           ) : null}
         </header>
 
         {profiles.isPending ? (
-          <div className="page-loading" role="status">
+          <div className={PAGE_LOADING_CLASS} role="status">
             正在读取模型版本…
           </div>
         ) : profiles.isError ? (
@@ -178,13 +205,13 @@ export function AdminModelsPage() {
         ) : profiles.data.items.length === 0 ? (
           <EmptyState
             action={
-              <button
-                className="button-primary"
+              <Button
                 onClick={() => setCreateOpen(true)}
                 type="button"
+                variant="primary"
               >
                 创建第一个模型版本
-              </button>
+              </Button>
             }
             description="只有已启用且支持流式与工具调用的版本才能设为默认。"
             icon="sliders"
@@ -192,35 +219,34 @@ export function AdminModelsPage() {
           />
         ) : (
           <>
-            <ul className="admin-model-list">
+            <ul className={ADMIN_CARD_LIST_CLASS}>
               {visibleProfiles.map((profile) => {
                 const isDefault =
                   profile.id === profiles.data.default_profile_id;
                 return (
                   <li
-                    className={`admin-model-card${
-                      isDefault ? " is-default" : ""
-                    }`}
+                    className={cn(
+                      ADMIN_CARD_CLASS,
+                      isDefault &&
+                        "border-brand-border shadow-[inset_3px_0_0_var(--brand-hover)] hover:shadow-[inset_3px_0_0_var(--brand-hover),var(--shadow-xs)]",
+                    )}
                     key={profile.id}
                   >
-                    <div className="admin-card-heading">
-                      <div>
-                        <div className="admin-title-line">
+                    <div className={ADMIN_CARD_HEADING_CLASS}>
+                      <div className="min-w-0">
+                        <div className={ADMIN_TITLE_LINE_CLASS}>
                           <h3>{profile.name}</h3>
                           {isDefault ? (
-                            <span className="admin-status-badge is-accent">
+                            <Badge className="rounded-full" variant="brand">
                               当前默认
-                            </span>
+                            </Badge>
                           ) : null}
-                          <span
-                            className={`admin-status-badge${
-                              profile.enabled
-                                ? " is-success"
-                                : " is-muted"
-                            }`}
+                          <Badge
+                            className="rounded-full"
+                            variant={profile.enabled ? "success" : "neutral"}
                           >
                             {profile.enabled ? "已启用" : "已停用"}
-                          </span>
+                          </Badge>
                           {profile.scenario_label?.trim() ? (
                             <Badge variant="info">
                               {profile.scenario_label.trim()}
@@ -235,15 +261,15 @@ export function AdminModelsPage() {
                               ? "用户可见"
                               : "仅内部使用"}
                           </Badge>
-                          <span className="admin-status-badge">
+                          <Badge className="rounded-full" variant="neutral">
                             v{profile.version}
-                          </span>
+                          </Badge>
                         </div>
-                        <p className="admin-code-line">
+                        <p className={ADMIN_CODE_LINE_CLASS}>
                           {profile.protocol} · {profile.model}
                         </p>
                         {profile.scenario_description?.trim() ? (
-                          <p className="admin-muted">
+                          <p className={ADMIN_MUTED_CLASS}>
                             {profile.scenario_description.trim()}
                           </p>
                         ) : null}
@@ -251,16 +277,18 @@ export function AdminModelsPage() {
                       <ModelCapabilityList profile={profile} />
                     </div>
 
-                    <dl className="admin-detail-grid">
-                      <div className="admin-detail-wide">
+                    <dl className={ADMIN_DETAIL_GRID_CLASS}>
+                      <div className={ADMIN_DETAIL_WIDE_CLASS}>
                         <dt>HTTPS Base URL</dt>
-                        <dd className="admin-code-value">
+                        <dd className={ADMIN_CODE_VALUE_CLASS}>
                           {profile.base_url}
                         </dd>
                       </div>
                       <div>
                         <dt>API Key 状态</dt>
-                        <dd className="admin-code-value">已配置 API Key</dd>
+                        <dd className={ADMIN_CODE_VALUE_CLASS}>
+                          已配置 API Key
+                        </dd>
                       </div>
                       <div>
                         <dt>Tokenizer</dt>
@@ -295,12 +323,13 @@ export function AdminModelsPage() {
                       </div>
                     </dl>
 
-                    <footer className="admin-card-actions">
-                      <button
-                        className="button-quiet"
+                    <footer className={ADMIN_CARD_ACTIONS_CLASS}>
+                      <Button
                         disabled={actionPending}
                         onClick={() => void handleEnabledChange(profile)}
+                        size="sm"
                         type="button"
+                        variant="outline"
                       >
                         {enabledMutation.isPending &&
                         enabledMutation.variables?.profileId === profile.id
@@ -308,30 +337,31 @@ export function AdminModelsPage() {
                           : profile.enabled
                             ? "停用版本"
                             : "启用版本"}
-                      </button>
+                      </Button>
                       {isDefault ? (
-                        <span className="admin-action-note">
+                        <span className={ADMIN_MUTED_CLASS}>
                           默认版本由后端记录，停用后不会自动切换。
                         </span>
                       ) : (
-                        <button
-                          className="button-quiet"
+                        <Button
                           disabled={
                             actionPending || !modelCanBeDefault(profile)
                           }
                           onClick={() => void handleSetDefault(profile)}
+                          size="sm"
                           title={
                             modelCanBeDefault(profile)
                               ? undefined
                               : "仅已启用且支持流式与工具调用的版本可设为默认"
                           }
                           type="button"
+                          variant="outline"
                         >
                           {defaultMutation.isPending &&
                           defaultMutation.variables === profile.id
                             ? "正在切换…"
                             : "设为默认"}
-                        </button>
+                        </Button>
                       )}
                     </footer>
                   </li>
@@ -351,16 +381,16 @@ export function AdminModelsPage() {
 
       <section
         aria-labelledby="compression-policy-title"
-        className="admin-section"
+        className={cn(ADMIN_SECTION_CLASS, "mt-[18px]")}
       >
-        <header className="admin-section-heading">
+        <header className={ADMIN_SECTION_HEADING_CLASS}>
           <div>
             <h2 id="compression-policy-title">上下文压缩策略</h2>
           </div>
         </header>
 
         {policy.isPending ? (
-          <div className="page-loading" role="status">
+          <div className={PAGE_LOADING_CLASS} role="status">
             正在读取压缩策略…
           </div>
         ) : policy.isError ? (
@@ -371,17 +401,17 @@ export function AdminModelsPage() {
         ) : policy.data.id === null ? (
           <EmptyState
             action={
-              <button
-                className="button-primary"
+              <Button
                 disabled={
                   !profiles.isSuccess ||
                   !profiles.data.items.some((profile) => profile.enabled)
                 }
                 onClick={() => setCompressionOpen(true)}
                 type="button"
+                variant="primary"
               >
                 配置压缩策略
-              </button>
+              </Button>
             }
             description={
               profiles.isSuccess &&
@@ -393,9 +423,10 @@ export function AdminModelsPage() {
             title="尚未配置上下文压缩"
           />
         ) : (
-          <article className="admin-policy-card">
+          /* 上下文压缩策略卡片上下单列排布，下方指标自适应网格展开 */
+          <article className={cn(ADMIN_CARD_CLASS, "grid grid-cols-1 gap-4")}>
             <div>
-              <h3>
+              <h3 className="mt-1 text-[19px] font-semibold text-text-primary [overflow-wrap:anywhere]">
                 {profiles.data?.items.find(
                   (profile) =>
                     profile.id ===
@@ -404,14 +435,20 @@ export function AdminModelsPage() {
                   policy.data.compression_model_profile_id ??
                   "后端未返回模型标识"}
               </h3>
-              <p className="admin-muted">策略版本 {policy.data.id}</p>
+              <p className={ADMIN_MUTED_CLASS}>策略版本 {policy.data.id}</p>
               {(() => {
                 const compressionProfile = profiles.data?.items.find(
                   (profile) =>
                     profile.id === policy.data.compression_model_profile_id,
                 );
                 return compressionProfile && !compressionProfile.enabled ? (
-                  <p className="admin-warning" role="status">
+                  <p
+                    className={cn(
+                      NOTICE_WARNING_CLASS,
+                      "mt-2.5 font-semibold",
+                    )}
+                    role="status"
+                  >
                     当前策略仍会固定到新 Run；该模型未启用时，Run 会回退到完整上下文，超出模型上下文窗口时才会失败。
                   </p>
                 ) : null;
@@ -419,7 +456,7 @@ export function AdminModelsPage() {
             </div>
             <dl
               aria-label="压缩策略 Token 与派生预算"
-              className="admin-policy-ratios"
+              className="m-0 grid w-full grid-cols-[repeat(auto-fit,minmax(120px,1fr))] gap-[5px] min-[391px]:gap-2 [&>div]:min-w-0 [&>div]:rounded-[9px] [&>div]:border [&>div]:border-border-default [&>div]:bg-subtle [&>div]:px-1.5 [&>div]:py-2 min-[391px]:[&>div]:p-[9px] sm:[&>div]:min-w-[72px] sm:[&>div]:px-3 sm:[&>div]:py-2.5 [&_dt]:text-xs [&_dt]:text-text-tertiary [&_dd]:mt-[3px] [&_dd]:text-base [&_dd]:font-semibold [&_dd]:text-text-primary min-[391px]:[&_dd]:text-lg"
             >
               <div>
                 <dt>触发阈值</dt>
@@ -450,23 +487,24 @@ export function AdminModelsPage() {
                 <dd>{formatTokenCount(policyBudgets?.summary ?? null)}</dd>
               </div>
             </dl>
-            <div className="admin-policy-footer">
+            <div className="col-span-full flex flex-col items-stretch justify-between gap-3.5 border-t border-border-subtle pt-[13px] text-xs text-text-tertiary sm:flex-row sm:items-center max-sm:[&>button]:w-full">
               <span>
                 {policy.data.created_at
                   ? `创建于 ${formatDateTime(policy.data.created_at)}`
                   : "后端未返回创建时间"}
               </span>
-              <button
-                className="button-quiet"
+              <Button
                 disabled={
                   !profiles.isSuccess ||
                   !profiles.data.items.some((profile) => profile.enabled)
                 }
                 onClick={() => setCompressionOpen(true)}
+                size="sm"
                 type="button"
+                variant="outline"
               >
                 保存新策略版本
-              </button>
+              </Button>
             </div>
           </article>
         )}

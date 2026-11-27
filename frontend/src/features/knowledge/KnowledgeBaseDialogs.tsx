@@ -1,7 +1,18 @@
 import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 
-import { VisibilityBadge, type VisibilityScope } from "../../shared/ui";
+import {
+  Button,
+  CHECKBOX_INPUT_DANGER_CLASS,
+  CHECKBOX_LABEL_CLASS,
+  CONFIRM_COPY_CLASS,
+  FIELD_CLASS,
+  FIELD_INPUT_CLASS,
+  FIELD_SELECT_CLASS,
+  FORM_STACK_CLASS,
+  VisibilityBadge,
+  type VisibilityScope,
+} from "../../shared/ui";
 import { ErrorBanner } from "../../shared/ui/ErrorBanner";
 import { Modal } from "../../shared/ui/Modal";
 import {
@@ -146,11 +157,13 @@ function KnowledgeVisibilityFields({
 
   if (allowedScopes.length === 1) {
     return (
-      <div className="workspace-field">
+      <div className={FIELD_CLASS}>
         <span>可见范围</span>
         <div className="flex items-center gap-2 pt-0.5">
           <VisibilityBadge scope="personal" />
-          <small>当前角色仅支持创建与维护个人知识库。</small>
+          <small className="text-xs text-text-tertiary">
+            当前角色仅支持创建与维护个人知识库。
+          </small>
         </div>
       </div>
     );
@@ -162,10 +175,11 @@ function KnowledgeVisibilityFields({
 
   return (
     <>
-      <label className="workspace-field" htmlFor={scopeSelectId}>
+      <label className={FIELD_CLASS} htmlFor={scopeSelectId}>
         <span>可见范围</span>
         <select
           aria-label="可见范围"
+          className={FIELD_SELECT_CLASS}
           disabled={disabled}
           id={scopeSelectId}
           onChange={(event) =>
@@ -189,7 +203,7 @@ function KnowledgeVisibilityFields({
       </label>
 
       {scope === "department" ? (
-        <div className="workspace-field">
+        <div className={FIELD_CLASS}>
           {/* 仅在渲染实际表单控件时绑定 htmlFor，避免无控件状态出现悬空 label。 */}
           {hasDepartmentControl ? (
             <label htmlFor={deptSelectId}>归属部门</label>
@@ -209,6 +223,7 @@ function KnowledgeVisibilityFields({
               aria-describedby={departmentError ? deptErrorId : undefined}
               aria-invalid={departmentError ? true : undefined}
               aria-label="归属部门"
+              className={FIELD_SELECT_CLASS}
               disabled={disabled}
               id={deptSelectId}
               onChange={(event) => onDepartmentChange(event.target.value)}
@@ -230,6 +245,7 @@ function KnowledgeVisibilityFields({
                 aria-invalid={departmentError ? true : undefined}
                 aria-label="归属部门"
                 autoComplete="off"
+                className={FIELD_INPUT_CLASS}
                 disabled={disabled}
                 id={deptSelectId}
                 onChange={(event) => onDepartmentChange(event.target.value)}
@@ -243,6 +259,7 @@ function KnowledgeVisibilityFields({
               aria-describedby={departmentError ? deptErrorId : undefined}
               aria-invalid={departmentError ? true : undefined}
               aria-label="归属部门"
+              className={FIELD_SELECT_CLASS}
               disabled={disabled}
               id={deptSelectId}
               onChange={(event) => onDepartmentChange(event.target.value)}
@@ -443,22 +460,22 @@ export function NewKnowledgeBaseDialog({
       description="知识库用于保存可检索的文档与文本资料。"
       footer={
         <>
-          <button
-            className="button-quiet"
+          <Button
             disabled={mutation.isPending}
             onClick={close}
             type="button"
+            variant="outline"
           >
             取消
-          </button>
-          <button
-            className="button-primary"
+          </Button>
+          <Button
             disabled={mutation.isPending || deptAdminMissingManagedDepts}
             form={formId}
             type="submit"
+            variant="primary"
           >
             {mutation.isPending ? "正在创建…" : "创建知识库"}
-          </button>
+          </Button>
         </>
       }
       onClose={close}
@@ -471,20 +488,21 @@ export function NewKnowledgeBaseDialog({
       title="新建知识库"
     >
       <form
-        className="knowledge-form"
+        className={FORM_STACK_CLASS}
         id={formId}
         onSubmit={(event) => {
           event.preventDefault();
           void handleSubmit();
         }}
       >
-        <label className="workspace-field" htmlFor={`${formId}-name`}>
+        <label className={FIELD_CLASS} htmlFor={`${formId}-name`}>
           <span>知识库名称</span>
           <input
             aria-label="知识库名称"
             aria-describedby={nameError ? nameErrorId : undefined}
             aria-invalid={nameError ? true : undefined}
             autoComplete="off"
+            className={FIELD_INPUT_CLASS}
             data-autofocus
             id={`${formId}-name`}
             onChange={(event) => {
@@ -503,10 +521,7 @@ export function NewKnowledgeBaseDialog({
           </p>
         ) : null}
 
-        <label
-          className="workspace-field"
-          htmlFor={`${formId}-description`}
-        >
+        <label className={FIELD_CLASS} htmlFor={`${formId}-description`}>
           <span>说明（可选）</span>
           <input
             aria-label="说明"
@@ -515,6 +530,7 @@ export function NewKnowledgeBaseDialog({
             }
             aria-invalid={descriptionError ? true : undefined}
             autoComplete="off"
+            className={FIELD_INPUT_CLASS}
             id={`${formId}-description`}
             onChange={(event) => {
               setDescription(event.target.value);
@@ -825,22 +841,22 @@ export function EditKnowledgeBaseDialog({
       description="名称、说明与可见范围会同步更新到知识库目录中。"
       footer={
         <>
-          <button
-            className="button-quiet"
+          <Button
             disabled={mutation.isPending}
             onClick={close}
             type="button"
+            variant="outline"
           >
             取消
-          </button>
-          <button
-            className="button-primary"
+          </Button>
+          <Button
             disabled={mutation.isPending || deptAdminMissingManagedDepts}
             form={formId}
             type="submit"
+            variant="primary"
           >
             {mutation.isPending ? "正在保存…" : "保存知识库"}
-          </button>
+          </Button>
         </>
       }
       onClose={close}
@@ -853,20 +869,21 @@ export function EditKnowledgeBaseDialog({
       title="编辑知识库"
     >
       <form
-        className="knowledge-form"
+        className={FORM_STACK_CLASS}
         id={formId}
         onSubmit={(event) => {
           event.preventDefault();
           void handleSubmit();
         }}
       >
-        <label className="workspace-field" htmlFor={`${formId}-edit-name`}>
+        <label className={FIELD_CLASS} htmlFor={`${formId}-edit-name`}>
           <span>知识库名称</span>
           <input
             aria-label="知识库名称"
             aria-describedby={nameError ? nameErrorId : undefined}
             aria-invalid={nameError ? true : undefined}
             autoComplete="off"
+            className={FIELD_INPUT_CLASS}
             data-autofocus
             id={`${formId}-edit-name`}
             onChange={(event) => {
@@ -883,10 +900,7 @@ export function EditKnowledgeBaseDialog({
           </p>
         ) : null}
 
-        <label
-          className="workspace-field"
-          htmlFor={`${formId}-edit-description`}
-        >
+        <label className={FIELD_CLASS} htmlFor={`${formId}-edit-description`}>
           <span>说明</span>
           <input
             aria-label="说明"
@@ -895,6 +909,7 @@ export function EditKnowledgeBaseDialog({
             }
             aria-invalid={descriptionError ? true : undefined}
             autoComplete="off"
+            className={FIELD_INPUT_CLASS}
             id={`${formId}-edit-description`}
             onChange={(event) => {
               setDescription(event.target.value);
@@ -1014,38 +1029,36 @@ export function DeleteKnowledgeBaseDialog({
       description="知识库删除后，其项目关联也会移除。"
       footer={
         <>
-          <button
-            className="button-quiet"
+          <Button
             data-autofocus
             disabled={mutation.isPending}
             onClick={close}
             type="button"
+            variant="outline"
           >
             取消
-          </button>
-          <button
-            className="button-danger"
+          </Button>
+          <Button
             disabled={!confirmed || mutation.isPending}
             onClick={() => void handleDelete()}
             type="button"
+            variant="danger"
           >
             {mutation.isPending ? "正在删除…" : "删除知识库"}
-          </button>
+          </Button>
         </>
       }
       onClose={close}
       open={open}
       title="删除知识库"
     >
-      <p className="confirm-copy">
+      <p className={CONFIRM_COPY_CLASS}>
         确定删除“{base.name}”吗？知识库中的文档、版本和项目关联将无法继续访问。
       </p>
-      <label
-        className="workspace-checkbox workspace-checkbox--danger"
-        htmlFor={checkboxId}
-      >
+      <label className={CHECKBOX_LABEL_CLASS} htmlFor={checkboxId}>
         <input
           checked={confirmed}
+          className={CHECKBOX_INPUT_DANGER_CLASS}
           id={checkboxId}
           onChange={(event) => setConfirmed(event.target.checked)}
           type="checkbox"

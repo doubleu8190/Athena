@@ -1,11 +1,8 @@
 """认证与用户身份领域公共接口。"""
 
-from domain.auth.model import (
+from domain.auth.errors import (
     AdminPromotionError,
-    AuthContext,
-    AuthProvider,
     AuthProviderDisabledError,
-    AuthSession,
     EmailAlreadyRegisteredError,
     InvalidCredentialsError,
     InvalidCurrentPasswordError,
@@ -21,8 +18,13 @@ from domain.auth.model import (
     RateLimitExceededError,
     RateLimitUnavailableError,
     SsoAuthenticationError,
-    User,
     UserDisabledError,
+)
+from domain.auth.model import (
+    AuthContext,
+    AuthProvider,
+    AuthSession,
+    User,
     UserRole,
     UserStatus,
 )

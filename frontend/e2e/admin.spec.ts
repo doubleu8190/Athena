@@ -263,8 +263,8 @@ test("管理端详情列表左对齐、模型表单报错双列对齐与子智�
 
   await page.goto("/admin/subagents");
 
-  // 验证管理卡片 .admin-detail-grid 内 dd 与 dt 左边缘对齐（消除浏览器默认 40px 缩进）
-  const detailCell = page.locator(".admin-detail-grid > div").first();
+  // 验证管理卡片详情列表内 dd 与 dt 左边缘对齐（消除浏览器默认 40px 缩进）
+  const detailCell = page.locator("dl > div").first();
   await expect(detailCell).toBeVisible();
   const detailOffset = await detailCell.evaluate((cell) => {
     const dt = cell.querySelector("dt");
@@ -279,7 +279,7 @@ test("管理端详情列表左对齐、模型表单报错双列对齐与子智�
   expect(detailOffset).not.toBeNull();
   expect(detailOffset!).toBeLessThanOrEqual(1);
 
-  // 验证子智能体新建弹窗桌面端宽度符合 .admin-modal（> 600px），且字段 label 字重 >= 600
+  // 验证子智能体新建弹窗桌面端宽度符合宽弹窗规格（> 600px），且字段 label 字重 >= 600
   await page.getByRole("button", { name: "新建子智能体" }).click();
   const subagentDialog = page.getByRole("dialog", { name: "新建子智能体" });
   await expect(subagentDialog).toBeVisible();
@@ -288,7 +288,7 @@ test("管理端详情列表左对齐、模型表单报错双列对齐与子智�
   expect(dialogBox!.width).toBeGreaterThan(600);
 
   const labelFontWeight = await subagentDialog
-    .locator(".workspace-field > label")
+    .locator("form label[for]")
     .first()
     .evaluate((el) =>
       Number.parseInt(window.getComputedStyle(el).fontWeight, 10),

@@ -1,6 +1,22 @@
 import { useEffect, useId, useRef, useState } from "react";
 
 import { getAuthIdentityEpoch } from "../../shared/api/client";
+import {
+  ADMIN_MUTED_CLASS,
+  Badge,
+  Button,
+  CHECKBOX_INPUT_CLASS,
+  CHECKBOX_LABEL_CLASS,
+  FIELD_CLASS,
+  FIELD_INPUT_CLASS,
+  FIELD_SELECT_CLASS,
+  FIELD_TEXTAREA_CLASS,
+  FORM_GRID_2_CLASS,
+  FORM_STACK_CLASS,
+  MODAL_WIDTH_XL,
+  PAGE_LOADING_CLASS,
+  cn,
+} from "../../shared/ui";
 import { ErrorBanner } from "../../shared/ui/ErrorBanner";
 import { FieldError } from "../../shared/ui/FieldError";
 import { Icon } from "../../shared/ui/Icons";
@@ -184,26 +200,26 @@ export function SubagentDialog({
       }
       footer={
         <>
-          <button
-            className="button-quiet"
+          <Button
             disabled={pending}
             onClick={onClose}
             type="button"
+            variant="outline"
           >
             取消
-          </button>
-          <button
-            className="button-primary"
+          </Button>
+          <Button
             disabled={pending || (editing && detail.isPending)}
             form={formId}
             type="submit"
+            variant="primary"
           >
             {pending
               ? "正在保存…"
               : editing
                 ? "保存修改"
                 : "创建子智能体"}
-          </button>
+          </Button>
         </>
       }
       onClose={() => {
@@ -212,11 +228,11 @@ export function SubagentDialog({
         }
       }}
       open={open}
-      panelClassName="admin-modal admin-dialog admin-subagent-dialog"
+      panelClassName={MODAL_WIDTH_XL}
       title={editing ? "编辑子智能体" : "新建子智能体"}
     >
       {editing && detail.isPending ? (
-        <div className="page-loading" role="status">
+        <div className={PAGE_LOADING_CLASS} role="status">
           正在读取子智能体配置…
         </div>
       ) : editing && detail.isError ? (
@@ -226,7 +242,7 @@ export function SubagentDialog({
         />
       ) : (
         <form
-          className="admin-form"
+          className={FORM_STACK_CLASS}
           id={formId}
           noValidate
           onSubmit={(event) => void handleSubmit(event)}
@@ -248,12 +264,13 @@ export function SubagentDialog({
             />
           ) : null}
 
-          <div className="admin-form-grid">
-            <div className="workspace-field">
+          <div className={FORM_GRID_2_CLASS}>
+            <div className={FIELD_CLASS}>
               <label htmlFor={`${formId}-slug`}>Slug 标识</label>
               <input
                 aria-describedby={`${formId}-slug-hint ${formId}-slug-error`}
                 aria-invalid={Boolean(errors.slug)}
+                className={FIELD_INPUT_CLASS}
                 disabled={pending}
                 id={`${formId}-slug`}
                 onChange={(event) =>
@@ -273,11 +290,12 @@ export function SubagentDialog({
               <FieldError error={errors.slug} id={`${formId}-slug-error`} />
             </div>
 
-            <div className="workspace-field">
+            <div className={FIELD_CLASS}>
               <label htmlFor={`${formId}-name`}>显示名称</label>
               <input
                 aria-describedby={`${formId}-name-hint ${formId}-name-error`}
                 aria-invalid={Boolean(errors.name)}
+                className={FIELD_INPUT_CLASS}
                 disabled={pending}
                 id={`${formId}-name`}
                 onChange={(event) =>
@@ -298,11 +316,12 @@ export function SubagentDialog({
             </div>
           </div>
 
-          <div className="workspace-field">
+          <div className={FIELD_CLASS}>
             <label htmlFor={`${formId}-description`}>能力描述</label>
             <textarea
               aria-describedby={`${formId}-description-hint ${formId}-description-error`}
               aria-invalid={Boolean(errors.description)}
+              className={FIELD_TEXTAREA_CLASS}
               disabled={pending}
               id={`${formId}-description`}
               onChange={(event) =>
@@ -326,9 +345,10 @@ export function SubagentDialog({
             />
           </div>
 
-          <div className="workspace-field">
+          <div className={FIELD_CLASS}>
             <label htmlFor={`${formId}-model`}>绑定模型</label>
             <select
+              className={FIELD_SELECT_CLASS}
               disabled={pending || models.isPending}
               id={`${formId}-model`}
               onChange={(event) =>
@@ -354,11 +374,12 @@ export function SubagentDialog({
             </select>
           </div>
 
-          <div className="workspace-field">
+          <div className={FIELD_CLASS}>
             <label htmlFor={`${formId}-prompt`}>System Prompt</label>
             <textarea
               aria-describedby={`${formId}-prompt-hint ${formId}-prompt-error`}
               aria-invalid={Boolean(errors.system_prompt)}
+              className={FIELD_TEXTAREA_CLASS}
               disabled={pending}
               id={`${formId}-prompt`}
               onChange={(event) =>
@@ -385,10 +406,15 @@ export function SubagentDialog({
           <fieldset
             aria-describedby={`${formId}-tools-hint ${formId}-tools-count ${formId}-tools-error`}
             aria-invalid={Boolean(errors.allowed_tool_ids)}
-            className="admin-subagent-tools-fieldset"
+            className="m-0 flex min-w-0 flex-col gap-2.5 rounded-[10px] border border-border-default bg-subtle p-[13px]"
           >
-            <legend>工具权限白名单</legend>
-            <p className="admin-form-help" id={`${formId}-tools-hint`}>
+            <legend className="px-1.5 text-[13px] font-semibold text-text-primary">
+              工具权限白名单
+            </legend>
+            <p
+              className="text-xs leading-[1.65] text-text-tertiary [overflow-wrap:anywhere] [&>svg]:mr-1 [&>svg]:inline-block [&>svg]:align-[-2px]"
+              id={`${formId}-tools-hint`}
+            >
               <Icon name="shield" size={13} />{" "}
               最多可选择 {MAX_SUBAGENT_ALLOWED_TOOLS} 项。
               系统已自动禁止子智能体嵌套调度（<code>dispatch_subagents</code>{" "}
@@ -396,9 +422,12 @@ export function SubagentDialog({
             </p>
             <p
               aria-live="polite"
-              className={`admin-form-help${
-                toolLimitReached ? " is-limit" : ""
-              }`}
+              className={cn(
+                "text-xs leading-[1.65] [overflow-wrap:anywhere]",
+                toolLimitReached
+                  ? "font-semibold text-brand-hover"
+                  : "text-text-tertiary",
+              )}
               id={`${formId}-tools-count`}
               role="status"
             >
@@ -408,7 +437,7 @@ export function SubagentDialog({
                 : "。"}
             </p>
             {availableTools.isPending ? (
-              <p className="admin-muted" role="status">
+              <p className={ADMIN_MUTED_CLASS} role="status">
                 正在读取可选工具目录…
               </p>
             ) : availableTools.isError ? (
@@ -417,28 +446,34 @@ export function SubagentDialog({
                 onRetry={() => void availableTools.refetch()}
               />
             ) : availableTools.data.groups.length === 0 ? (
-              <p className="admin-muted">当前没有可授予的工具。</p>
+              <p className={ADMIN_MUTED_CLASS}>当前没有可授予的工具。</p>
             ) : (
-              <div className="admin-subagent-tool-groups">
+              <div className="flex max-h-[min(42svh,320px)] min-w-0 flex-col gap-3 overflow-x-hidden overflow-y-auto pr-0.5 min-[721px]:max-h-[280px]">
                 {availableTools.data.groups.map((group) => (
                   <div
-                    className="admin-subagent-tool-group"
+                    className="flex min-w-0 flex-col gap-1.5"
                     key={group.group_key}
                   >
-                    <div className="admin-subagent-tool-group-header">
+                    <div className="flex min-w-0 items-center justify-between gap-2.5 border-b border-border-subtle pb-[5px] text-xs text-text-secondary">
                       <strong>{group.label}</strong>
                       <span>{group.items.length} 项</span>
                     </div>
-                    <ul className="admin-subagent-tool-list">
+                    <ul className="m-0 flex min-w-0 list-none flex-col gap-1.5 p-0">
                       {group.items.map((tool) => {
                         const checked = values.allowed_tool_ids.includes(
                           tool.tool_id,
                         );
                         return (
                           <li key={tool.tool_id}>
-                            <label className="workspace-checkbox admin-subagent-tool-item">
+                            <label
+                              className={cn(
+                                CHECKBOX_LABEL_CLASS,
+                                "min-h-9 w-full min-w-0 items-start gap-2 rounded-lg px-2 py-1.5 transition-colors hover:bg-brand-subtle",
+                              )}
+                            >
                               <input
                                 checked={checked}
+                                className={cn(CHECKBOX_INPUT_CLASS, "mt-0.5")}
                                 disabled={
                                   pending ||
                                   (!checked && toolLimitReached)
@@ -446,21 +481,26 @@ export function SubagentDialog({
                                 onChange={() => toggleTool(tool.tool_id)}
                                 type="checkbox"
                               />
-                              <span className="admin-subagent-tool-copy">
-                                <span className="admin-subagent-tool-title">
+                              <span className="flex min-w-0 flex-1 flex-col gap-0.5">
+                                <span className="flex min-w-0 flex-wrap items-center gap-2">
                                   <strong>{tool.name}</strong>
-                                  <span
-                                    className={`admin-status-badge${
-                                      tool.requires_approval ? " is-accent" : ""
-                                    }`}
+                                  <Badge
+                                    className="rounded-full"
+                                    variant={
+                                      tool.requires_approval
+                                        ? "brand"
+                                        : "neutral"
+                                    }
                                   >
                                     {tool.requires_approval
                                       ? "需人工审批"
                                       : "免审批"}
-                                  </span>
+                                  </Badge>
                                 </span>
                                 {tool.description ? (
-                                  <small>{tool.description}</small>
+                                  <small className="text-xs leading-[1.4] text-text-secondary [overflow-wrap:anywhere]">
+                                    {tool.description}
+                                  </small>
                                 ) : null}
                               </span>
                             </label>
@@ -478,14 +518,15 @@ export function SubagentDialog({
             />
           </fieldset>
 
-          <div className="admin-form-grid">
-            <div className="workspace-field">
+          <div className={FORM_GRID_2_CLASS}>
+            <div className={FIELD_CLASS}>
               <label htmlFor={`${formId}-max-requests`}>
                 最大 LLM 请求次数（可选，1–50）
               </label>
               <input
                 aria-describedby={`${formId}-max-requests-error`}
                 aria-invalid={Boolean(errors.max_llm_requests)}
+                className={FIELD_INPUT_CLASS}
                 disabled={pending}
                 id={`${formId}-max-requests`}
                 inputMode="numeric"
@@ -505,13 +546,14 @@ export function SubagentDialog({
               />
             </div>
 
-            <div className="workspace-field">
+            <div className={FIELD_CLASS}>
               <label htmlFor={`${formId}-timeout`}>
                 单次执行超时秒数（可选，10–1800）
               </label>
               <input
                 aria-describedby={`${formId}-timeout-error`}
                 aria-invalid={Boolean(errors.timeout_seconds)}
+                className={FIELD_INPUT_CLASS}
                 disabled={pending}
                 id={`${formId}-timeout`}
                 inputMode="numeric"
@@ -533,9 +575,10 @@ export function SubagentDialog({
           </div>
 
           {!editing ? (
-            <label className="workspace-checkbox admin-checkbox-line">
+            <label className={cn(CHECKBOX_LABEL_CLASS, "shrink-0")}>
               <input
                 checked={values.enabled}
+                className={CHECKBOX_INPUT_CLASS}
                 disabled={pending}
                 onChange={(event) =>
                   setValues((current) => ({

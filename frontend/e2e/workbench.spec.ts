@@ -1944,7 +1944,8 @@ test.describe("Athena v2 第三期多模态、技能双形态与知识库共享�
 
     // 1. 打开「新建在线模板技能」弹窗，填写元数据、Markdown 正文预览、跨管辖部门共享与首页推荐。
     await page
-      .locator("header.page-heading")
+      .locator("main header")
+      .first()
       .getByRole("button", { name: "新建在线模板技能" })
       .click();
     const createDialog = page.getByTestId("admin-skill-markdown-dialog");
@@ -2118,7 +2119,8 @@ test.describe("Athena v2 第三期多模态、技能双形态与知识库共享�
 
     // 3. 点击「添加资料 → 粘贴文本」，在双栏 MarkdownSplitEditor 中输入正文并校验右侧预览渲染。
     await page
-      .locator(".knowledge-hero-actions")
+      .locator("main header")
+      .first()
       .getByRole("button", { name: "添加资料" })
       .click();
     const ingestDialog = page.getByRole("dialog", { name: "添加资料" });

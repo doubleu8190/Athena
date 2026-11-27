@@ -195,7 +195,7 @@ export function Modal({
         {...(description ? {} : { "aria-describedby": undefined })}
         aria-modal={isTopmost ? "true" : undefined}
         className={cn(
-          "modal-card overflow-hidden rounded-[14px]",
+          "w-[min(470px,100%)] max-h-[calc(100svh-24px)] overflow-hidden rounded-[14px] sm:max-h-[calc(100svh-56px)]",
           panelClassName,
         )}
         closeDisabled={closeDisabled}
@@ -240,7 +240,7 @@ export function Modal({
         ref={contentRef}
         size="none"
       >
-        <header className="modal-header flex shrink-0 items-start justify-between gap-5 border-b border-border-subtle px-4 pt-5 pb-4 sm:px-[22px]">
+        <header className="flex shrink-0 items-start justify-between gap-5 border-b border-border-subtle px-4 pt-5 pb-4 sm:px-[22px]">
           <div>
             <DialogTitle className="text-lg font-semibold tracking-tight text-text-primary">
               {title}
@@ -254,7 +254,7 @@ export function Modal({
           <DialogClose asChild>
             <button
               aria-label="关闭弹窗"
-              className="modal-close grid h-[31px] w-[31px] shrink-0 place-items-center rounded-[7px] bg-transparent text-text-tertiary transition-colors hover:enabled:bg-subtle hover:enabled:text-text-primary disabled:pointer-events-none disabled:opacity-40"
+              className="grid h-[31px] w-[31px] shrink-0 place-items-center rounded-[7px] bg-transparent text-text-tertiary transition-colors hover:enabled:bg-subtle hover:enabled:text-text-primary disabled:pointer-events-none disabled:opacity-40"
               disabled={closeDisabled}
               type="button"
             >
@@ -263,11 +263,11 @@ export function Modal({
           </DialogClose>
         </header>
         <ModalDepthContext.Provider value={modalDepth}>
-          <div className="modal-body flex min-h-0 min-w-0 flex-1 flex-col gap-[13px] overflow-y-auto px-4 py-[18px] sm:px-[22px]">
+          <div className="flex min-h-0 min-w-0 flex-1 flex-col gap-[13px] overflow-y-auto px-4 py-[18px] sm:px-[22px]">
             {children}
           </div>
           {footer ? (
-            <footer className="modal-footer flex min-w-0 shrink-0 flex-wrap justify-end gap-[9px] border-t border-border-subtle px-4 pt-3.5 pb-[18px] sm:px-[22px]">
+            <footer className="flex min-w-0 shrink-0 flex-wrap justify-end gap-[9px] border-t border-border-subtle px-4 pt-3.5 pb-[18px] sm:px-[22px] max-[420px]:[&>button]:flex-[1_1_120px]">
               {footer}
             </footer>
           ) : null}

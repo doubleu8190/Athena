@@ -5,10 +5,10 @@ from __future__ import annotations
 import json
 import random
 import re
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from typing import cast
+from typing import Any, cast
 
 from sqlalchemy import (
     ColumnElement,
@@ -25,6 +25,7 @@ from sqlalchemy import (
     update,
 )
 from sqlalchemy.dialects.postgresql import ARRAY
+from sqlalchemy.engine import Row
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm import load_only
 from sqlalchemy.sql import Select
@@ -241,6 +242,202 @@ def _personal_privacy_guard(actor_id: str) -> ColumnElement[bool]:
     )
 
 
+def _lease_expiry_expr(lease_seconds: int) -> Any:
+    """生成基于数据库时钟的租约截止时间表达式。"""
+    return func.clock_timestamp() + text(f"INTERVAL '{lease_seconds} seconds'")
+
+
+def _claimable_job_clauses() -> tuple[ColumnElement[bool], ...]:
+    """返回可认领（待执行或租约已过期）的入库/清理任务公共过滤条件。"""
+    return (
+        KnowledgeJobModel.kind.in_(("ingestion", "cleanup")),
+        KnowledgeJobModel.state.in_(("queued", "retry", "processing")),
+        KnowledgeJobModel.next_attempt_at <= func.clock_timestamp(),
+        KnowledgeJobModel.lease_until.is_(None)
+        | (KnowledgeJobModel.lease_until < func.clock_timestamp()),
+    )
+
+
+def _activate_job_lease(job: KnowledgeJobModel, lease_seconds: int) -> None:
+    """将已锁定的任务推进为 processing，并递增尝试次数与 fencing token。"""
+    job.state = "processing"
+    job.attempt += 1
+    job.fencing_token += 1
+    job.lease_until = _lease_expiry_expr(lease_seconds)
+    job.updated_at = func.clock_timestamp()
+
+
+def _is_active_job_lease(
+    task: KnowledgeJobModel | None,
+    fencing_token: int,
+    now: datetime,
+) -> bool:
+    """校验任务仍处于当前 worker 持有的未过期 processing 租约。"""
+    return (
+        task is not None
+        and task.state == "processing"
+        and task.fencing_token == fencing_token
+        and task.lease_until is not None
+        and task.lease_until > now
+    )
+
+
+def _new_queued_job(
+    *,
+    job_id: str,
+    owner_id: str,
+    kind: str,
+    target_id: str,
+    at: Any,
+) -> KnowledgeJobModel:
+    """构造初始入队状态的知识库后台任务行。"""
+    return KnowledgeJobModel(
+        id=job_id,
+        owner_id=owner_id,
+        kind=kind,
+        target_id=target_id,
+        state="queued",
+        attempt=0,
+        fencing_token=0,
+        next_attempt_at=at,
+        created_at=at,
+        updated_at=at,
+    )
+
+
+async def _lock_base(
+    session: AsyncSession,
+    base_id: str,
+    *,
+    owner_id: str | None = None,
+    active_only: bool = True,
+) -> KnowledgeBaseModel | None:
+    """以 FOR UPDATE 锁定知识库行，按需附带个人私有纵深防御与未删除过滤。"""
+    conditions: list[ColumnElement[bool]] = [KnowledgeBaseModel.id == base_id]
+    if owner_id is not None:
+        conditions.append(_personal_privacy_guard(owner_id))
+    if active_only:
+        conditions.append(KnowledgeBaseModel.deleted_time.is_(None))
+    return await session.scalar(select(KnowledgeBaseModel).where(*conditions).with_for_update())
+
+
+async def _lock_document(
+    session: AsyncSession,
+    document_id: str,
+    *,
+    base_id: str | None = None,
+    active_only: bool = True,
+) -> KnowledgeDocumentModel | None:
+    """以 FOR UPDATE 锁定知识库文档行，按需限定所属知识库与未删除状态。"""
+    conditions: list[ColumnElement[bool]] = [KnowledgeDocumentModel.id == document_id]
+    if base_id is not None:
+        conditions.append(KnowledgeDocumentModel.knowledge_base_id == base_id)
+    if active_only:
+        conditions.append(KnowledgeDocumentModel.deleted_time.is_(None))
+    return await session.scalar(select(KnowledgeDocumentModel).where(*conditions).with_for_update())
+
+
+async def _lock_job(session: AsyncSession, job_id: str) -> KnowledgeJobModel | None:
+    """以 FOR UPDATE 锁定后台任务行。"""
+    return await session.scalar(
+        select(KnowledgeJobModel).where(KnowledgeJobModel.id == job_id).with_for_update()
+    )
+
+
+async def _load_base_grants(
+    session: AsyncSession,
+    base_id: str,
+) -> tuple[VisibilityGrant, ...]:
+    """在当前数据库会话中加载单个知识库的可见性授权列表。"""
+    grants_map = await load_grants_map_in_session(session, ResourceType.KNOWLEDGE_BASE, (base_id,))
+    return grants_map.get(base_id, ())
+
+
+async def _delete_document_versions_and_requests(
+    session: AsyncSession,
+    document_ids: Sequence[str],
+    *,
+    exclude_job_id: str,
+    include_doc_cleanup_jobs: bool = False,
+) -> list[str]:
+    """清理目标文档集合关联的版本任务、版本记录与幂等请求，并返回待回收原件 ID 列表。"""
+    if not document_ids:
+        return []
+    version_rows = (
+        await session.execute(
+            select(KnowledgeVersionModel.id, KnowledgeVersionModel.source_id).where(
+                KnowledgeVersionModel.document_id.in_(document_ids),
+            )
+        )
+    ).all()
+    version_ids = [row[0] for row in version_rows]
+    candidate_source_ids = [row[1] for row in version_rows if row[1] is not None]
+    if version_ids:
+        await session.execute(
+            delete(KnowledgeJobModel).where(
+                KnowledgeJobModel.id != exclude_job_id,
+                KnowledgeJobModel.target_id.in_(version_ids),
+            )
+        )
+    if include_doc_cleanup_jobs:
+        await session.execute(
+            delete(KnowledgeJobModel).where(
+                KnowledgeJobModel.id != exclude_job_id,
+                KnowledgeJobModel.kind == "cleanup",
+                KnowledgeJobModel.target_id.in_([f"doc:{item}" for item in document_ids]),
+            )
+        )
+    await session.execute(
+        delete(KnowledgeVersionModel).where(KnowledgeVersionModel.document_id.in_(document_ids))
+    )
+    await session.execute(
+        delete(KnowledgeRequestModel).where(KnowledgeRequestModel.document_id.in_(document_ids))
+    )
+    return candidate_source_ids
+
+
+async def _delete_unused_sources(
+    session: AsyncSession,
+    candidate_source_ids: Sequence[str],
+) -> None:
+    """仅回收不再被任何版本引用的原件记录（跨管理员删除同样安全生效）。"""
+    if not candidate_source_ids:
+        return
+    unused_sources = list(
+        await session.scalars(
+            select(KnowledgeSourceModel.id).where(
+                KnowledgeSourceModel.id.in_(candidate_source_ids),
+                ~exists(
+                    select(KnowledgeVersionModel.id).where(
+                        KnowledgeVersionModel.source_id == KnowledgeSourceModel.id,
+                    )
+                ),
+            )
+        )
+    )
+    if unused_sources:
+        await session.execute(
+            delete(KnowledgeSourceModel).where(KnowledgeSourceModel.id.in_(unused_sources))
+        )
+
+
+def _visible_documents_query(owner_id: str, base_id: str) -> Select[KnowledgeDocumentModel]:
+    """构造未删除知识库下的可见未删除文档基础查询。"""
+    return (
+        select(KnowledgeDocumentModel)
+        .join(
+            KnowledgeBaseModel,
+            KnowledgeBaseModel.id == KnowledgeDocumentModel.knowledge_base_id,
+        )
+        .where(
+            KnowledgeDocumentModel.knowledge_base_id == base_id,
+            KnowledgeDocumentModel.deleted_time.is_(None),
+            KnowledgeBaseModel.deleted_time.is_(None),
+            _personal_privacy_guard(owner_id),
+        )
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class _FileSourceInput:
     """文件原件持久化参数，供统一文档创建与替换事务使用。"""
@@ -404,17 +601,10 @@ class KnowledgeRepository:
         if lease_seconds < 1 or owner_concurrency < 1:
             raise ValueError("lease_seconds_invalid")
         async with self._sessions() as session, session.begin():
+            claimable = _claimable_job_clauses()
             candidates = await session.scalars(
                 select(KnowledgeJobModel.owner_id)
-                .where(
-                    KnowledgeJobModel.kind.in_(("ingestion", "cleanup")),
-                    KnowledgeJobModel.state.in_(("queued", "retry", "processing")),
-                    KnowledgeJobModel.next_attempt_at <= func.clock_timestamp(),
-                    (
-                        KnowledgeJobModel.lease_until.is_(None)
-                        | (KnowledgeJobModel.lease_until < func.clock_timestamp())
-                    ),
-                )
+                .where(*claimable)
                 .order_by(KnowledgeJobModel.next_attempt_at, KnowledgeJobModel.created_at)
                 .limit(100)
             )
@@ -437,14 +627,7 @@ class KnowledgeRepository:
                     continue
                 job = await session.scalar(
                     select(KnowledgeJobModel)
-                    .where(
-                        KnowledgeJobModel.owner_id == owner_id,
-                        KnowledgeJobModel.kind.in_(("ingestion", "cleanup")),
-                        KnowledgeJobModel.state.in_(("queued", "retry", "processing")),
-                        KnowledgeJobModel.next_attempt_at <= func.clock_timestamp(),
-                        KnowledgeJobModel.lease_until.is_(None)
-                        | (KnowledgeJobModel.lease_until < func.clock_timestamp()),
-                    )
+                    .where(KnowledgeJobModel.owner_id == owner_id, *claimable)
                     .order_by(KnowledgeJobModel.next_attempt_at, KnowledgeJobModel.created_at)
                     .with_for_update(skip_locked=True)
                     .limit(1)
@@ -491,13 +674,7 @@ class KnowledgeRepository:
                     )
                 )
                 keys = await session.scalars(source_query)
-                job.state = "processing"
-                job.attempt += 1
-                job.fencing_token += 1
-                job.lease_until = func.clock_timestamp() + text(
-                    f"INTERVAL '{lease_seconds} seconds'"
-                )
-                job.updated_at = func.clock_timestamp()
+                _activate_job_lease(job, lease_seconds)
                 return ClaimedKnowledgeJob(
                     job.id,
                     job.owner_id,
@@ -543,11 +720,7 @@ class KnowledgeRepository:
                 if version.source_id
                 else None
             )
-            job.state = "processing"
-            job.attempt += 1
-            job.fencing_token += 1
-            job.lease_until = func.clock_timestamp() + text(f"INTERVAL '{lease_seconds} seconds'")
-            job.updated_at = func.clock_timestamp()
+            _activate_job_lease(job, lease_seconds)
             version.state = "processing"
             return ClaimedKnowledgeJob(
                 job.id,
@@ -568,19 +741,12 @@ class KnowledgeRepository:
         if lease_seconds < 1:
             raise ValueError("lease_seconds_invalid")
         async with self._sessions() as session, session.begin():
-            job = await session.scalar(
-                select(KnowledgeJobModel).where(KnowledgeJobModel.id == job_id).with_for_update()
-            )
+            job = await _lock_job(session, job_id)
             now = cast(datetime, await session.scalar(select(func.clock_timestamp())))
-            if (
-                job is None
-                or job.state != "processing"
-                or job.fencing_token != fencing_token
-                or job.lease_until is None
-                or job.lease_until <= now
-            ):
+            if not _is_active_job_lease(job, fencing_token, now):
                 return False
-            job.lease_until = func.clock_timestamp() + text(f"INTERVAL '{lease_seconds} seconds'")
+            assert job is not None
+            job.lease_until = _lease_expiry_expr(lease_seconds)
             job.updated_at = func.clock_timestamp()
             return True
 
@@ -601,27 +767,10 @@ class KnowledgeRepository:
             )
             if base_id is None:
                 return False
-            base = await session.scalar(
-                select(KnowledgeBaseModel)
-                .where(
-                    KnowledgeBaseModel.id == base_id,
-                )
-                .with_for_update()
-            )
-            document = await session.scalar(
-                select(KnowledgeDocumentModel)
-                .where(
-                    KnowledgeDocumentModel.id == job.document_id,
-                )
-                .with_for_update()
-            )
-            task = await session.scalar(
-                select(KnowledgeJobModel)
-                .where(
-                    KnowledgeJobModel.id == job.job_id,
-                )
-                .with_for_update()
-            )
+            # 严格维持 知识库 → 文档 → 任务 → 版本 行锁顺序，避免与管理端写操作交叉死锁。
+            base = await _lock_base(session, base_id, active_only=False)
+            document = await _lock_document(session, job.document_id, active_only=False)
+            task = await _lock_job(session, job.job_id)
             version = await session.scalar(
                 select(KnowledgeVersionModel)
                 .where(
@@ -635,17 +784,14 @@ class KnowledgeRepository:
                 document is None
                 or base is None
                 or base.deleted_time is not None
-                or task is None
                 or version is None
                 or version.profile_id != job.profile_id
                 or document.deleted_time is not None
-                or task.state != "processing"
-                or task.fencing_token != job.fencing_token
-                or task.lease_until is None
-                or task.lease_until <= database_now
+                or not _is_active_job_lease(task, job.fencing_token, database_now)
                 or document.pending_version_id != job.version_id
             ):
                 return False
+            assert task is not None
             await session.execute(
                 delete(KnowledgeChunkModel)
                 .where(KnowledgeChunkModel.version_id == job.version_id)
@@ -752,41 +898,18 @@ class KnowledgeRepository:
                 )
             )
             if base_id is not None:
-                await session.scalar(
-                    select(KnowledgeBaseModel)
-                    .where(
-                        KnowledgeBaseModel.id == base_id,
-                    )
-                    .with_for_update()
-                )
-            document = await session.scalar(
-                select(KnowledgeDocumentModel)
-                .where(
-                    KnowledgeDocumentModel.id == job.document_id,
-                )
-                .with_for_update()
-            )
-            task = await session.scalar(
-                select(KnowledgeJobModel)
-                .where(
-                    KnowledgeJobModel.id == job.job_id,
-                )
-                .with_for_update()
-            )
+                await _lock_base(session, base_id, active_only=False)
+            document = await _lock_document(session, job.document_id, active_only=False)
+            task = await _lock_job(session, job.job_id)
             version = await session.scalar(
                 select(KnowledgeVersionModel)
                 .where(KnowledgeVersionModel.id == job.version_id)
                 .with_for_update()
             )
             database_now = cast(datetime, await session.scalar(select(func.clock_timestamp())))
-            if (
-                task is None
-                or task.state != "processing"
-                or task.fencing_token != job.fencing_token
-                or task.lease_until is None
-                or task.lease_until <= database_now
-            ):
+            if not _is_active_job_lease(task, job.fencing_token, database_now):
                 return
+            assert task is not None
             retry = retryable and (task.kind == "cleanup" or task.attempt < 3)
             task.state = "retry" if retry else "failed"
             task.error_code = error_code[:64]
@@ -815,111 +938,37 @@ class KnowledgeRepository:
                 )
                 if base_id is None:
                     return False
-                await session.scalar(
-                    select(KnowledgeBaseModel)
-                    .where(
-                        KnowledgeBaseModel.id == base_id,
-                    )
-                    .with_for_update()
-                )
-                document = await session.scalar(
-                    select(KnowledgeDocumentModel)
-                    .where(
-                        KnowledgeDocumentModel.id == document_id,
-                    )
-                    .with_for_update()
-                )
-                task = await session.scalar(
-                    select(KnowledgeJobModel)
-                    .where(KnowledgeJobModel.id == job.job_id)
-                    .with_for_update()
-                )
+                await _lock_base(session, base_id, active_only=False)
+                document = await _lock_document(session, document_id, active_only=False)
+                task = await _lock_job(session, job.job_id)
                 now = cast(datetime, await session.scalar(select(func.clock_timestamp())))
                 if (
                     document is None
                     or document.deleted_time is None
-                    or task is None
-                    or task.state != "processing"
-                    or task.fencing_token != job.fencing_token
-                    or task.lease_until is None
-                    or task.lease_until <= now
+                    or not _is_active_job_lease(task, job.fencing_token, now)
                 ):
                     return False
-                version_rows = (
-                    await session.execute(
-                        select(KnowledgeVersionModel.id, KnowledgeVersionModel.source_id).where(
-                            KnowledgeVersionModel.document_id == document_id,
-                        )
-                    )
-                ).all()
-                version_ids = [row[0] for row in version_rows]
-                candidate_source_ids = [row[1] for row in version_rows if row[1] is not None]
-                if version_ids:
-                    await session.execute(
-                        delete(KnowledgeJobModel).where(
-                            KnowledgeJobModel.id != task.id,
-                            KnowledgeJobModel.target_id.in_(version_ids),
-                        )
-                    )
-                await session.execute(
-                    delete(KnowledgeVersionModel).where(
-                        KnowledgeVersionModel.document_id == document_id,
-                    )
+                assert task is not None
+                candidate_source_ids = await _delete_document_versions_and_requests(
+                    session,
+                    (document_id,),
+                    exclude_job_id=task.id,
                 )
-                await session.execute(
-                    delete(KnowledgeRequestModel).where(
-                        KnowledgeRequestModel.document_id == document_id,
-                    )
-                )
-                # 仅回收当前文档曾经引用且已无任何其他版本引用的原件记录（跨管理员删除同样生效）。
-                if candidate_source_ids:
-                    unused_sources = list(
-                        await session.scalars(
-                            select(KnowledgeSourceModel.id).where(
-                                KnowledgeSourceModel.id.in_(candidate_source_ids),
-                                ~exists(
-                                    select(KnowledgeVersionModel.id).where(
-                                        KnowledgeVersionModel.source_id == KnowledgeSourceModel.id,
-                                    )
-                                ),
-                            )
-                        )
-                    )
-                    if unused_sources:
-                        await session.execute(
-                            delete(KnowledgeSourceModel).where(
-                                KnowledgeSourceModel.id.in_(unused_sources),
-                            )
-                        )
+                await _delete_unused_sources(session, candidate_source_ids)
                 task.state = "done"
                 task.lease_until = None
                 task.updated_at = func.clock_timestamp()
                 return True
-            base = await session.scalar(
-                select(KnowledgeBaseModel)
-                .where(
-                    KnowledgeBaseModel.id == job.target_id,
-                )
-                .with_for_update()
-            )
-            task = await session.scalar(
-                select(KnowledgeJobModel)
-                .where(
-                    KnowledgeJobModel.id == job.job_id,
-                )
-                .with_for_update()
-            )
+            base = await _lock_base(session, job.target_id, active_only=False)
+            task = await _lock_job(session, job.job_id)
             now = cast(datetime, await session.scalar(select(func.clock_timestamp())))
             if (
                 base is None
                 or base.deleted_time is None
-                or task is None
-                or task.state != "processing"
-                or task.fencing_token != job.fencing_token
-                or task.lease_until is None
-                or task.lease_until <= now
+                or not _is_active_job_lease(task, job.fencing_token, now)
             ):
                 return False
+            assert task is not None
             document_ids = list(
                 await session.scalars(
                     select(KnowledgeDocumentModel.id).where(
@@ -927,44 +976,12 @@ class KnowledgeRepository:
                     )
                 )
             )
-            version_rows = (
-                (
-                    await session.execute(
-                        select(KnowledgeVersionModel.id, KnowledgeVersionModel.source_id).where(
-                            KnowledgeVersionModel.document_id.in_(document_ids),
-                        )
-                    )
-                ).all()
-                if document_ids
-                else []
+            candidate_source_ids = await _delete_document_versions_and_requests(
+                session,
+                document_ids,
+                exclude_job_id=task.id,
+                include_doc_cleanup_jobs=True,
             )
-            version_ids = [row[0] for row in version_rows]
-            candidate_source_ids = [row[1] for row in version_rows if row[1] is not None]
-            if version_ids:
-                await session.execute(
-                    delete(KnowledgeJobModel).where(
-                        KnowledgeJobModel.id != task.id,
-                        KnowledgeJobModel.target_id.in_(version_ids),
-                    )
-                )
-            if document_ids:
-                await session.execute(
-                    delete(KnowledgeJobModel).where(
-                        KnowledgeJobModel.id != task.id,
-                        KnowledgeJobModel.kind == "cleanup",
-                        KnowledgeJobModel.target_id.in_([f"doc:{item}" for item in document_ids]),
-                    )
-                )
-                await session.execute(
-                    delete(KnowledgeVersionModel).where(
-                        KnowledgeVersionModel.document_id.in_(document_ids),
-                    )
-                )
-                await session.execute(
-                    delete(KnowledgeRequestModel).where(
-                        KnowledgeRequestModel.document_id.in_(document_ids),
-                    )
-                )
             await session.execute(
                 delete(ProjectKnowledgeBaseModel).where(
                     ProjectKnowledgeBaseModel.knowledge_base_id == base.id,
@@ -977,25 +994,7 @@ class KnowledgeRepository:
                         KnowledgeDocumentModel.id.in_(document_ids),
                     )
                 )
-            if candidate_source_ids:
-                source_ids = list(
-                    await session.scalars(
-                        select(KnowledgeSourceModel.id).where(
-                            KnowledgeSourceModel.id.in_(candidate_source_ids),
-                            ~exists(
-                                select(KnowledgeVersionModel.id).where(
-                                    KnowledgeVersionModel.source_id == KnowledgeSourceModel.id,
-                                )
-                            ),
-                        )
-                    )
-                )
-                if source_ids:
-                    await session.execute(
-                        delete(KnowledgeSourceModel).where(
-                            KnowledgeSourceModel.id.in_(source_ids),
-                        )
-                    )
+            await _delete_unused_sources(session, candidate_source_ids)
             await session.delete(base)
             task.state = "done"
             task.lease_until = None
@@ -1042,15 +1041,7 @@ class KnowledgeRepository:
             if project is None:
                 return False
             # 复合外键已拆除：支持绑定 company/department 知识库及本人 personal 知识库。
-            base = await session.scalar(
-                select(KnowledgeBaseModel)
-                .where(
-                    KnowledgeBaseModel.id == base_id,
-                    _personal_privacy_guard(owner_id),
-                    KnowledgeBaseModel.deleted_time.is_(None),
-                )
-                .with_for_update()
-            )
+            base = await _lock_base(session, base_id, owner_id=owner_id)
             if base is None:
                 raise LookupError("knowledge_base_not_found")
             existing = await session.get(ProjectKnowledgeBaseModel, (project_id, base_id))
@@ -1096,13 +1087,7 @@ class KnowledgeRepository:
             )
             if project is None:
                 return False
-            await session.scalar(
-                select(KnowledgeBaseModel)
-                .where(
-                    KnowledgeBaseModel.id == base_id,
-                )
-                .with_for_update()
-            )
+            await _lock_base(session, base_id, active_only=False)
             link = await session.get(ProjectKnowledgeBaseModel, (project_id, base_id))
             if link is not None and link.owner_id == owner_id:
                 await session.delete(link)
@@ -1148,10 +1133,7 @@ class KnowledgeRepository:
             )
             if model is None:
                 return None
-            grants_map = await load_grants_map_in_session(
-                session, ResourceType.KNOWLEDGE_BASE, (model.id,)
-            )
-            return _base(model, grants=grants_map.get(model.id, ()))
+            return _base(model, grants=await _load_base_grants(session, model.id))
 
     async def list_readable_bases(
         self,
@@ -1222,14 +1204,7 @@ class KnowledgeRepository:
     ) -> KnowledgeBase | None:
         """在单事务行锁内更新知识库元数据，仅当提供 visibility_scope 时才变更可见性与授权。"""
         async with self._sessions() as session, session.begin():
-            model = await session.scalar(
-                select(KnowledgeBaseModel)
-                .where(
-                    KnowledgeBaseModel.id == base_id,
-                    KnowledgeBaseModel.deleted_time.is_(None),
-                )
-                .with_for_update()
-            )
+            model = await _lock_base(session, base_id)
             if model is None:
                 return None
             model.name = name
@@ -1251,23 +1226,13 @@ class KnowledgeRepository:
                     now=at,
                 )
             else:
-                grants_map = await load_grants_map_in_session(
-                    session, ResourceType.KNOWLEDGE_BASE, (model.id,)
-                )
-                grants = grants_map.get(model.id, ())
+                grants = await _load_base_grants(session, model.id)
             return _base(model, grants=grants)
 
     async def soft_delete_base(self, owner_id: str, base_id: str, at: datetime) -> bool:
         """在单事务内软删除知识库、清理全部项目绑定及可见性授权并入队清理任务。"""
         async with self._sessions() as session, session.begin():
-            item = await session.scalar(
-                select(KnowledgeBaseModel)
-                .where(
-                    KnowledgeBaseModel.id == base_id,
-                    _personal_privacy_guard(owner_id),
-                )
-                .with_for_update()
-            )
+            item = await _lock_base(session, base_id, owner_id=owner_id, active_only=False)
             if item is None:
                 return False
             item.deleted_time = item.deleted_time or at
@@ -1291,17 +1256,12 @@ class KnowledgeRepository:
             )
             if cleanup is None:
                 session.add(
-                    KnowledgeJobModel(
-                        id=new_id("kjob"),
+                    _new_queued_job(
+                        job_id=new_id("kjob"),
                         owner_id=owner_id,
                         kind="cleanup",
                         target_id=base_id,
-                        state="queued",
-                        attempt=0,
-                        fencing_token=0,
-                        next_attempt_at=at,
-                        created_at=at,
-                        updated_at=at,
+                        at=at,
                     )
                 )
             return True
@@ -1309,17 +1269,8 @@ class KnowledgeRepository:
     async def get_document(self, owner_id: str, base_id: str, document_id: str) -> Document | None:
         async with self._sessions() as session:
             model = await session.scalar(
-                select(KnowledgeDocumentModel)
-                .join(
-                    KnowledgeBaseModel,
-                    KnowledgeBaseModel.id == KnowledgeDocumentModel.knowledge_base_id,
-                )
-                .where(
+                _visible_documents_query(owner_id, base_id).where(
                     KnowledgeDocumentModel.id == document_id,
-                    KnowledgeDocumentModel.knowledge_base_id == base_id,
-                    KnowledgeDocumentModel.deleted_time.is_(None),
-                    KnowledgeBaseModel.deleted_time.is_(None),
-                    _personal_privacy_guard(owner_id),
                 )
             )
             if model is None:
@@ -1360,15 +1311,7 @@ class KnowledgeRepository:
             if replay is not None:
                 return replay
             # 锁定目标知识库串行化同库写入与配额核验，再复查幂等记录防止并发同键撞主键。
-            base = await session.scalar(
-                select(KnowledgeBaseModel)
-                .where(
-                    KnowledgeBaseModel.id == base_id,
-                    _personal_privacy_guard(owner_id),
-                    KnowledgeBaseModel.deleted_time.is_(None),
-                )
-                .with_for_update()
-            )
+            base = await _lock_base(session, base_id, owner_id=owner_id)
             if base is None:
                 raise LookupError("knowledge_base_not_found")
             replay = await self._lookup_idempotent_request(
@@ -1382,15 +1325,7 @@ class KnowledgeRepository:
                 return replay
             if operation == "replace":
                 # 部门/公司库允许不同管理员替换既有文档，不按 KnowledgeDocumentModel.owner_id 过滤。
-                document = await session.scalar(
-                    select(KnowledgeDocumentModel)
-                    .where(
-                        KnowledgeDocumentModel.id == document_id,
-                        KnowledgeDocumentModel.knowledge_base_id == base_id,
-                        KnowledgeDocumentModel.deleted_time.is_(None),
-                    )
-                    .with_for_update()
-                )
+                document = await _lock_document(session, document_id, base_id=base_id)
                 if document is None:
                     raise LookupError("document_not_found")
                 if document.pending_version_id is not None:
@@ -1443,17 +1378,12 @@ class KnowledgeRepository:
                 chunk_count=0,
                 created_at=version_created_at,
             )
-            job = KnowledgeJobModel(
-                id=job_id,
+            job = _new_queued_job(
+                job_id=job_id,
                 owner_id=owner_id,
                 kind="ingestion",
                 target_id=version_id,
-                state="queued",
-                attempt=0,
-                fencing_token=0,
-                next_attempt_at=at,
-                created_at=at,
-                updated_at=at,
+                at=at,
             )
             request = KnowledgeRequestModel(
                 owner_id=owner_id,
@@ -1635,17 +1565,7 @@ class KnowledgeRepository:
         async with self._sessions() as session:
             rows = list(
                 await session.scalars(
-                    select(KnowledgeDocumentModel)
-                    .join(
-                        KnowledgeBaseModel,
-                        KnowledgeBaseModel.id == KnowledgeDocumentModel.knowledge_base_id,
-                    )
-                    .where(
-                        KnowledgeDocumentModel.knowledge_base_id == base_id,
-                        KnowledgeDocumentModel.deleted_time.is_(None),
-                        KnowledgeBaseModel.deleted_time.is_(None),
-                        _personal_privacy_guard(owner_id),
-                    )
+                    _visible_documents_query(owner_id, base_id)
                     .order_by(KnowledgeDocumentModel.updated_at.desc())
                     .offset(offset)
                     .limit(limit)
@@ -1662,26 +1582,10 @@ class KnowledgeRepository:
         self, owner_id: str, base_id: str, document_id: str, title: str, at: datetime
     ) -> Document | None:
         async with self._sessions() as session, session.begin():
-            base = await session.scalar(
-                select(KnowledgeBaseModel)
-                .where(
-                    KnowledgeBaseModel.id == base_id,
-                    _personal_privacy_guard(owner_id),
-                    KnowledgeBaseModel.deleted_time.is_(None),
-                )
-                .with_for_update()
-            )
+            base = await _lock_base(session, base_id, owner_id=owner_id)
             if base is None:
                 return None
-            document = await session.scalar(
-                select(KnowledgeDocumentModel)
-                .where(
-                    KnowledgeDocumentModel.id == document_id,
-                    KnowledgeDocumentModel.knowledge_base_id == base_id,
-                    KnowledgeDocumentModel.deleted_time.is_(None),
-                )
-                .with_for_update()
-            )
+            document = await _lock_document(session, document_id, base_id=base_id)
             if document is None:
                 return None
             document.title, document.updated_at = title, at
@@ -1694,23 +1598,11 @@ class KnowledgeRepository:
     ) -> list[str] | None:
         """软删除文档并清除派生版本，返回不再被引用的原件 key。"""
         async with self._sessions() as session, session.begin():
-            base = await session.scalar(
-                select(KnowledgeBaseModel)
-                .where(
-                    KnowledgeBaseModel.id == base_id,
-                    _personal_privacy_guard(owner_id),
-                )
-                .with_for_update()
-            )
+            base = await _lock_base(session, base_id, owner_id=owner_id, active_only=False)
             if base is None:
                 return None
-            document = await session.scalar(
-                select(KnowledgeDocumentModel)
-                .where(
-                    KnowledgeDocumentModel.id == document_id,
-                    KnowledgeDocumentModel.knowledge_base_id == base_id,
-                )
-                .with_for_update()
+            document = await _lock_document(
+                session, document_id, base_id=base_id, active_only=False
             )
             if document is None:
                 return None
@@ -1721,17 +1613,12 @@ class KnowledgeRepository:
             document.active_version_id = None
             document.pending_version_id = None
             session.add(
-                KnowledgeJobModel(
-                    id=new_id("kjob"),
+                _new_queued_job(
+                    job_id=new_id("kjob"),
                     owner_id=owner_id,
                     kind="cleanup",
                     target_id=f"doc:{document_id}",
-                    state="queued",
-                    attempt=0,
-                    fencing_token=0,
-                    next_attempt_at=func.clock_timestamp(),
-                    created_at=func.clock_timestamp(),
-                    updated_at=func.clock_timestamp(),
+                    at=func.clock_timestamp(),
                 )
             )
             return []
@@ -1763,26 +1650,10 @@ class KnowledgeRepository:
     ) -> DocumentVersion | None:
         """仅允许最新失败版本重试，阻止较旧内容覆盖新版本。"""
         async with self._sessions() as session, session.begin():
-            base = await session.scalar(
-                select(KnowledgeBaseModel)
-                .where(
-                    KnowledgeBaseModel.id == base_id,
-                    _personal_privacy_guard(owner_id),
-                    KnowledgeBaseModel.deleted_time.is_(None),
-                )
-                .with_for_update()
-            )
+            base = await _lock_base(session, base_id, owner_id=owner_id)
             if base is None:
                 return None
-            document = await session.scalar(
-                select(KnowledgeDocumentModel)
-                .where(
-                    KnowledgeDocumentModel.id == document_id,
-                    KnowledgeDocumentModel.knowledge_base_id == base_id,
-                    KnowledgeDocumentModel.deleted_time.is_(None),
-                )
-                .with_for_update()
-            )
+            document = await _lock_document(session, document_id, base_id=base_id)
             if document is None:
                 return None
             if document.pending_version_id is not None:
@@ -1818,17 +1689,12 @@ class KnowledgeRepository:
                 .with_for_update()
             )
             if existing_job is None:
-                existing_job = KnowledgeJobModel(
-                    id=job_id,
+                existing_job = _new_queued_job(
+                    job_id=job_id,
                     owner_id=owner_id,
                     kind="ingestion",
                     target_id=version_id,
-                    state="queued",
-                    attempt=0,
-                    fencing_token=0,
-                    next_attempt_at=at,
-                    created_at=at,
-                    updated_at=at,
+                    at=at,
                 )
                 session.add(existing_job)
             else:
@@ -1952,30 +1818,7 @@ class KnowledgeRepository:
         )
         async with self._sessions() as session:
             rows = await session.execute(query)
-            return tuple(
-                _search_hit_from_row(
-                    chunk_id,
-                    document_id,
-                    version_id,
-                    content,
-                    locator,
-                    ordinal,
-                    title,
-                    base_id,
-                    "keyword",
-                    position,
-                )
-                for position, (
-                    chunk_id,
-                    document_id,
-                    version_id,
-                    content,
-                    locator,
-                    ordinal,
-                    title,
-                    base_id,
-                ) in enumerate(rows, start=1)
-            )
+            return _rows_to_search_hits(rows, "keyword")
 
     async def search_semantic(
         self,
@@ -2004,54 +1847,16 @@ class KnowledgeRepository:
             async with session.begin():
                 await session.execute(text("SET LOCAL hnsw.iterative_scan = relaxed_order"))
                 rows = list(await session.execute(query))
-            return tuple(
-                _search_hit_from_row(
-                    chunk_id,
-                    document_id,
-                    version_id,
-                    content,
-                    locator,
-                    ordinal,
-                    title,
-                    base_id,
-                    "semantic",
-                    position,
-                )
-                for position, (
-                    chunk_id,
-                    document_id,
-                    version_id,
-                    content,
-                    locator,
-                    ordinal,
-                    title,
-                    base_id,
-                ) in enumerate(rows, start=1)
-            )
+            return _rows_to_search_hits(rows, "semantic")
 
     async def has_incompatible_profile(
         self, owner_id: str, base_ids: list[str], profile_id: str
     ) -> bool:
         """Report active embedded chunks that cannot share this query vector."""
         query = (
-            select(KnowledgeChunkModel.id)
-            .select_from(KnowledgeChunkModel)
-            .join(KnowledgeVersionModel, KnowledgeVersionModel.id == KnowledgeChunkModel.version_id)
-            .join(
-                KnowledgeDocumentModel,
-                KnowledgeDocumentModel.id == KnowledgeChunkModel.document_id,
-            )
-            .join(
-                KnowledgeBaseModel,
-                KnowledgeBaseModel.id == KnowledgeDocumentModel.knowledge_base_id,
-            )
+            _join_active_chunks(select(KnowledgeChunkModel.id).select_from(KnowledgeChunkModel))
             .where(
-                KnowledgeDocumentModel.knowledge_base_id.in_(base_ids),
-                KnowledgeDocumentModel.deleted_time.is_(None),
-                KnowledgeBaseModel.deleted_time.is_(None),
-                _personal_privacy_guard(owner_id),
-                KnowledgeDocumentModel.active_version_id == KnowledgeVersionModel.id,
-                KnowledgeVersionModel.state == "ready",
+                *_active_chunk_clauses(owner_id, base_ids=base_ids),
                 KnowledgeVersionModel.profile_id != profile_id,
                 KnowledgeChunkModel.embedding.is_not(None),
             )
@@ -2069,26 +1874,9 @@ class KnowledgeRepository:
         ids = [hit.chunk_id for hit in hits]
         async with self._sessions() as session:
             rows = await session.scalars(
-                select(KnowledgeChunkModel.id)
-                .join(
-                    KnowledgeVersionModel,
-                    KnowledgeVersionModel.id == KnowledgeChunkModel.version_id,
-                )
-                .join(
-                    KnowledgeDocumentModel,
-                    KnowledgeDocumentModel.id == KnowledgeChunkModel.document_id,
-                )
-                .join(
-                    KnowledgeBaseModel,
-                    KnowledgeBaseModel.id == KnowledgeDocumentModel.knowledge_base_id,
-                )
-                .where(
+                _join_active_chunks(select(KnowledgeChunkModel.id)).where(
                     KnowledgeChunkModel.id.in_(ids),
-                    KnowledgeDocumentModel.deleted_time.is_(None),
-                    KnowledgeBaseModel.deleted_time.is_(None),
-                    _personal_privacy_guard(owner_id),
-                    KnowledgeDocumentModel.active_version_id == KnowledgeChunkModel.version_id,
-                    KnowledgeVersionModel.state == "ready",
+                    *_active_chunk_clauses(owner_id),
                 )
             )
             active = set(rows)
@@ -2251,11 +2039,44 @@ def _select_keyword_tokens(tokens: tuple[str, ...]) -> tuple[str, ...]:
     return tuple(token for token in filtered if token in selected)
 
 
+def _join_active_chunks[*Ts](query: Select[*Ts]) -> Select[*Ts]:
+    """为分片查询挂载 版本 → 文档 → 知识库 三表联结。"""
+    return (
+        query.join(
+            KnowledgeVersionModel,
+            KnowledgeVersionModel.id == KnowledgeChunkModel.version_id,
+        )
+        .join(KnowledgeDocumentModel, KnowledgeDocumentModel.id == KnowledgeChunkModel.document_id)
+        .join(KnowledgeBaseModel, KnowledgeBaseModel.id == KnowledgeDocumentModel.knowledge_base_id)
+    )
+
+
+def _active_chunk_clauses(
+    owner_id: str,
+    *,
+    base_ids: list[str] | None = None,
+) -> tuple[ColumnElement[bool], ...]:
+    """返回可见且处于已发布活动版本的分片过滤条件。"""
+    clauses: list[ColumnElement[bool]] = []
+    if base_ids is not None:
+        clauses.append(KnowledgeDocumentModel.knowledge_base_id.in_(base_ids))
+    clauses.extend(
+        (
+            KnowledgeDocumentModel.deleted_time.is_(None),
+            KnowledgeBaseModel.deleted_time.is_(None),
+            _personal_privacy_guard(owner_id),
+            KnowledgeDocumentModel.active_version_id == KnowledgeVersionModel.id,
+            KnowledgeVersionModel.state == "ready",
+        )
+    )
+    return tuple(clauses)
+
+
 def _visible_chunk_rows_query(
     owner_id: str, base_ids: list[str]
 ) -> Select[str, str, str, str, dict[str, object], int, str, str]:
     """构造显式标量列投影的可见分片查询，彻底省去 1024 维 embedding 与 search_document 大列。"""
-    return (
+    return _join_active_chunks(
         select(
             KnowledgeChunkModel.id,
             KnowledgeChunkModel.document_id,
@@ -2266,31 +2087,19 @@ def _visible_chunk_rows_query(
             KnowledgeDocumentModel.title,
             KnowledgeDocumentModel.knowledge_base_id,
         )
-        .join(KnowledgeVersionModel, KnowledgeVersionModel.id == KnowledgeChunkModel.version_id)
-        .join(KnowledgeDocumentModel, KnowledgeDocumentModel.id == KnowledgeChunkModel.document_id)
-        .join(KnowledgeBaseModel, KnowledgeBaseModel.id == KnowledgeDocumentModel.knowledge_base_id)
-        .where(
-            KnowledgeDocumentModel.knowledge_base_id.in_(base_ids),
-            KnowledgeDocumentModel.deleted_time.is_(None),
-            KnowledgeBaseModel.deleted_time.is_(None),
-            _personal_privacy_guard(owner_id),
-            KnowledgeDocumentModel.active_version_id == KnowledgeVersionModel.id,
-            KnowledgeVersionModel.state == "ready",
-        )
-    )
+    ).where(*_active_chunk_clauses(owner_id, base_ids=base_ids))
 
 
 def _visible_chunks_query(
     owner_id: str, base_ids: list[str]
 ) -> Select[KnowledgeChunkModel, str, str]:
     """保留原有 3 元组 ORM 投影签名以兼容测试导入，并通过 load_only 跳过大列加载。"""
-    return (
+    return _join_active_chunks(
         select(
             KnowledgeChunkModel,
             KnowledgeDocumentModel.title,
             KnowledgeDocumentModel.knowledge_base_id,
-        )
-        .options(
+        ).options(
             load_only(
                 KnowledgeChunkModel.id,
                 KnowledgeChunkModel.document_id,
@@ -2300,17 +2109,37 @@ def _visible_chunks_query(
                 KnowledgeChunkModel.locator,
             )
         )
-        .join(KnowledgeVersionModel, KnowledgeVersionModel.id == KnowledgeChunkModel.version_id)
-        .join(KnowledgeDocumentModel, KnowledgeDocumentModel.id == KnowledgeChunkModel.document_id)
-        .join(KnowledgeBaseModel, KnowledgeBaseModel.id == KnowledgeDocumentModel.knowledge_base_id)
-        .where(
-            KnowledgeDocumentModel.knowledge_base_id.in_(base_ids),
-            KnowledgeDocumentModel.deleted_time.is_(None),
-            KnowledgeBaseModel.deleted_time.is_(None),
-            _personal_privacy_guard(owner_id),
-            KnowledgeDocumentModel.active_version_id == KnowledgeVersionModel.id,
-            KnowledgeVersionModel.state == "ready",
+    ).where(*_active_chunk_clauses(owner_id, base_ids=base_ids))
+
+
+def _rows_to_search_hits(
+    rows: Iterable[Row[str, str, str, str, dict[str, object], int, str, str]],
+    channel: str,
+) -> tuple[SearchHit, ...]:
+    """将关键词或语义召回的 8 列投影结果按排名转换为 SearchHit 元组。"""
+    return tuple(
+        _search_hit_from_row(
+            chunk_id,
+            document_id,
+            version_id,
+            content,
+            locator,
+            ordinal,
+            title,
+            base_id,
+            channel,
+            position,
         )
+        for position, (
+            chunk_id,
+            document_id,
+            version_id,
+            content,
+            locator,
+            ordinal,
+            title,
+            base_id,
+        ) in enumerate(rows, start=1)
     )
 
 

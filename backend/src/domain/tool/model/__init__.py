@@ -12,6 +12,7 @@ from domain.tool.model.entity import (
     PublicToolDefinition,
     ToolDefinition,
     ToolMetadataPatch,
+    ToolPage,
     validate_approval_summary_template,
     validate_parameter_labels,
     validate_tool_display_name,
@@ -53,7 +54,6 @@ from domain.tool.model.execution import (
     protocol_status_for_outcome,
     render_approval_summary,
 )
-from domain.tool.model.result import ToolPage
 from domain.tool.model.runtime import (
     MAX_RUNTIME_TOOL_SCHEMA_BYTES,
     MAX_RUNTIME_TOOLS,

@@ -61,7 +61,6 @@ from domain.skill import (
     SkillImportRequestResult,
     SkillNotFoundError,
     SkillPackageError,
-    SkillPackageManifest,
     SkillRepository,
     SkillScope,
     SkillScriptDefinition,
@@ -85,6 +84,20 @@ _DIRECTORY_SCOPE_PRIORITY: dict[SkillScope, int] = {
     SkillScope.COMPANY: 1,
     SkillScope.PERSONAL: 2,
 }
+
+
+def _is_plain_markdown_skill(skill: Skill, version: SkillVersion) -> bool:
+    """判断是否为无脚本、无依赖的纯 Markdown 技能（免于触发 Python 解释器探测）。"""
+    return (
+        skill.format is SkillFormat.MARKDOWN
+        and not version.dependency_requirements
+        and not version.manifest.scripts
+    )
+
+
+def _single_version_details(result: SkillImportRequestResult) -> SkillAdminDetails:
+    """将单版本写入或幂等重放结果包装为详情视图。"""
+    return SkillAdminDetails(result.skill, (result.version,))
 
 
 def _skill_access_target(skill: Skill) -> ResourceAccessTarget:
@@ -205,7 +218,7 @@ class SkillService:
             request_fingerprint=fingerprint,
         )
         if replay is not None:
-            return SkillAdminDetails(replay.skill, (replay.version,))
+            return _single_version_details(replay)
 
         skill_id = self._id_factory("skill")
         version_id = self._id_factory("skillver")
@@ -230,7 +243,7 @@ class SkillService:
                 request_fingerprint=fingerprint,
                 created_at=self._clock(),
             ),
-            to_details=lambda result: SkillAdminDetails(result.skill, (result.version,)),
+            to_details=_single_version_details,
         )
 
     async def publish_personal(
@@ -264,7 +277,7 @@ class SkillService:
             request_fingerprint=fingerprint,
         )
         if replay is not None:
-            return SkillAdminDetails(replay.skill, (replay.version,))
+            return _single_version_details(replay)
         skill = await self._repository.get_personal_skill(actor.user.id, skill_id)
         if skill is None:
             raise SkillNotFoundError()
@@ -293,7 +306,7 @@ class SkillService:
                 request_fingerprint=fingerprint,
                 created_at=self._clock(),
             ),
-            to_details=lambda result: SkillAdminDetails(result.skill, (result.version,)),
+            to_details=_single_version_details,
         )
 
     async def set_personal_enabled(
@@ -423,20 +436,15 @@ class SkillService:
             featured=featured,
             starter_prompt=normalized_starter_prompt,
         )
-        try:
-            replay = await self._repository.find_import_result(
-                actor,
-                operation="import",
-                target_skill_id=None,
-                idempotency_key=idempotency_key,
-                request_fingerprint=fingerprint,
-            )
-        except PermissionError as error:
-            raise SkillAuthorizationError("admin_required") from error
+        replay = await self._find_admin_replay(
+            actor,
+            operation="import",
+            target_skill_id=None,
+            idempotency_key=idempotency_key,
+            request_fingerprint=fingerprint,
+        )
         if replay is not None:
-            if replay.skill.deleted_at is not None:
-                raise SkillNotFoundError()
-            return await self._admin_details_for_replay(actor, replay)
+            return await self._admin_markdown_replay_details(actor, replay)
 
         skill_id = self._id_factory("skill")
         version_id = self._id_factory("skillver")
@@ -509,20 +517,15 @@ class SkillService:
             owner_department_id=skill.owner_department_id,
         )
         # 幂等重放先于 revision 预检，确保已成功提交后的网络重试不会因 revision 递增而误报 409。
-        try:
-            replay = await self._repository.find_import_result(
-                actor,
-                operation="add_version",
-                target_skill_id=skill_id,
-                idempotency_key=idempotency_key,
-                request_fingerprint=fingerprint,
-            )
-        except PermissionError as error:
-            raise SkillAuthorizationError("admin_required") from error
+        replay = await self._find_admin_replay(
+            actor,
+            operation="add_version",
+            target_skill_id=skill_id,
+            idempotency_key=idempotency_key,
+            request_fingerprint=fingerprint,
+        )
         if replay is not None:
-            if replay.skill.deleted_at is not None:
-                raise SkillNotFoundError()
-            return await self._admin_details_for_replay(actor, replay)
+            return await self._admin_markdown_replay_details(actor, replay)
 
         if skill.revision != expected_revision:
             raise SkillConflictError("skill_revision_conflict")
@@ -551,7 +554,7 @@ class SkillService:
                 request_fingerprint=fingerprint,
                 created_at=self._clock(),
             ),
-            to_details_async=lambda result: self._admin_details_for_replay(actor, result),
+            to_details_async=lambda result: self._admin_markdown_replay_details(actor, result),
         )
 
     async def import_package(
@@ -590,35 +593,50 @@ class SkillService:
             owner_department_id=resolved_department_id,
             visibility_grants=resolved_grants,
         )
-        try:
-            replay = await self._repository.find_import_result(
-                actor,
-                operation="import",
-                target_skill_id=None,
-                idempotency_key=idempotency_key,
-                request_fingerprint=fingerprint,
-            )
-        except PermissionError as error:
-            # 初始幂等读取同样在管理事务内复核登录态，撤权必须稳定返回 403。
-            raise SkillAuthorizationError("admin_required") from error
-        if replay is not None:
-            return SkillAdminDetails(replay.skill, (replay.version,))
-        dependency_check = await asyncio.to_thread(
-            self._dependency_checker.check,
-            validated.manifest.dependencies,
-            checked_at=self._clock(),
-        )
-        return await self._publish_import(
+        replay = await self._find_admin_replay(
             actor,
-            path,
+            operation="import",
+            target_skill_id=None,
             idempotency_key=idempotency_key,
             request_fingerprint=fingerprint,
-            manifest=validated.manifest,
+        )
+        if replay is not None:
+            return _single_version_details(replay)
+        dependency_check = await self._check_dependencies(validated.manifest.dependencies)
+        skill_id = self._id_factory("skill")
+        version_id = self._id_factory("skillver")
+
+        async def _write(object_key: str) -> SkillAdminDetails:
+            skill, version = await self._repository.create_skill(
+                skill_id=skill_id,
+                version_id=version_id,
+                label="v1",
+                manifest=validated.manifest,
+                object_key=object_key,
+                package_sha256=validated.package_sha256,
+                dependency_check=dependency_check,
+                actor=actor,
+                idempotency_key=idempotency_key,
+                request_fingerprint=fingerprint,
+                created_at=self._clock(),
+                scope=resolved_scope,
+                owner_department_id=resolved_department_id,
+                visibility_grants=resolved_grants,
+            )
+            return SkillAdminDetails(skill, (version,))
+
+        return await self._publish_zip_object(
+            actor,
+            path,
+            operation="import",
+            target_skill_id=None,
+            version_id=version_id,
             package_sha256=validated.package_sha256,
-            dependency_check=dependency_check,
-            scope=resolved_scope,
-            owner_department_id=resolved_department_id,
-            visibility_grants=resolved_grants,
+            idempotency_key=idempotency_key,
+            request_fingerprint=fingerprint,
+            write=_write,
+            extract_version_id=lambda details: details.versions[0].id,
+            replay_to_result=_single_version_details,
         )
 
     async def _commit_markdown_write[T](
@@ -645,29 +663,18 @@ class SkillService:
                 raise SkillUserAuthorizationError("not_authenticated") from error
             raise SkillAuthorizationError("admin_required") from error
         except Exception as error:
-            replay = (
-                await self._replay_personal_after_failure(
-                    actor,
-                    operation=operation,
-                    target_skill_id=target_skill_id,
-                    idempotency_key=idempotency_key,
-                    request_fingerprint=request_fingerprint,
-                )
-                if personal
-                else await self._replay_after_import_failure(
-                    actor,
-                    operation=operation,
-                    target_skill_id=target_skill_id,
-                    idempotency_key=idempotency_key,
-                    request_fingerprint=request_fingerprint,
-                )
+            replay = await self._replay_after_failure(
+                actor,
+                personal=personal,
+                operation=operation,
+                target_skill_id=target_skill_id,
+                idempotency_key=idempotency_key,
+                request_fingerprint=request_fingerprint,
             )
             if replay is not None:
                 if personal:
-                    return SkillAdminDetails(replay.skill, (replay.version,))
-                if replay.skill.deleted_at is not None:
-                    raise SkillNotFoundError() from None
-                return await self._admin_details_for_replay(actor, replay)
+                    return _single_version_details(replay)
+                return await self._admin_markdown_replay_details(actor, replay)
             if (
                 map_slug_exists_to_conflict
                 and isinstance(error, SkillConflictError)
@@ -681,6 +688,27 @@ class SkillService:
             return await to_details_async(written)
         assert to_details is not None
         return to_details(written)
+
+    async def _find_admin_replay(
+        self,
+        actor: AuthContext,
+        *,
+        operation: str,
+        target_skill_id: str | None,
+        idempotency_key: str,
+        request_fingerprint: str,
+    ) -> SkillImportRequestResult | None:
+        """读取已提交管理端幂等请求，并将事务内撤权统一映射为 403。"""
+        try:
+            return await self._repository.find_import_result(
+                actor,
+                operation=operation,
+                target_skill_id=target_skill_id,
+                idempotency_key=idempotency_key,
+                request_fingerprint=request_fingerprint,
+            )
+        except PermissionError as error:
+            raise SkillAuthorizationError("admin_required") from error
 
     async def _find_personal_replay(
         self,
@@ -703,18 +731,27 @@ class SkillService:
         except PermissionError as error:
             raise SkillUserAuthorizationError("not_authenticated") from error
 
-    async def _replay_personal_after_failure(
+    async def _replay_after_failure(
         self,
         actor: AuthContext,
         *,
+        personal: bool,
         operation: str,
         target_skill_id: str | None,
         idempotency_key: str,
         request_fingerprint: str,
     ) -> SkillImportRequestResult | None:
-        """数据库异常后尝试读取已提交结果；普通查询失败保持未知提交。"""
+        """数据库异常后尝试读取已提交幂等结果；优先透传取消与撤权，普通查询失败视为提交态不明。"""
         try:
-            return await self._find_personal_replay(
+            if personal:
+                return await self._find_personal_replay(
+                    actor,
+                    operation=operation,
+                    target_skill_id=target_skill_id,
+                    idempotency_key=idempotency_key,
+                    request_fingerprint=request_fingerprint,
+                )
+            return await self._find_admin_replay(
                 actor,
                 operation=operation,
                 target_skill_id=target_skill_id,
@@ -723,12 +760,15 @@ class SkillService:
             )
         except asyncio.CancelledError:
             raise
-        except SkillUserAuthorizationError:
+        except (SkillAuthorizationError, SkillUserAuthorizationError):
+            # 提交结果未知时仍必须优先反映管理员或用户会话撤权，不吞回普通失败。
             raise
         except (SkillConflictError, SkillNotFoundError):
-            # 恢复查询已经给出明确业务结论时必须返回该结论；尤其删除后
-            # 不能吞掉 404 再暴露原始数据库异常。
-            raise
+            # 个人恢复查询已给出明确业务结论（例如已删 404 或键冲突）时直接上抛，
+            # 避免吞掉 404 再暴露原始数据库异常；管理端 ZIP 冲突恢复返回 None 交由外层清理对象。
+            if personal:
+                raise
+            return None
         except Exception:
             return None
 
@@ -751,6 +791,49 @@ class SkillService:
             checked_at=self._clock(),
         )
 
+    async def _check_dependencies(
+        self,
+        requirements: Sequence[str],
+        *,
+        cached: bool = False,
+    ) -> DependencyCheck:
+        """在工作线程执行目标环境依赖探测，可选走只读缓存避免 GET 目录高频探测。"""
+        if cached:
+            return await asyncio.to_thread(self._dependency_checker.check_cached, requirements)
+        return await asyncio.to_thread(
+            self._dependency_checker.check,
+            requirements,
+            checked_at=self._clock(),
+        )
+
+    async def _validate_visibility(
+        self,
+        *,
+        user_id: str,
+        visibility_scope: VisibilityScope,
+        owner_department_id: str | None,
+        visibility_grants: Sequence[VisibilityGrantInput] | None,
+        for_create: bool,
+        existing_target: ResourceAccessTarget | None = None,
+        preserve_existing_grants_when_none: bool = True,
+    ) -> tuple[VisibilityScope, str | None, tuple[VisibilityGrantInput, ...] | None]:
+        """统一调用权限引擎校验可见性范围与授权，并将领域异常映射为 Skill 层业务异常。"""
+        try:
+            return await self._access_policy.resolve_and_validate_visibility(
+                user_id=user_id,
+                resource_type=ResourceType.SKILL,
+                visibility_scope=visibility_scope,
+                owner_department_id=owner_department_id,
+                visibility_grants=visibility_grants,
+                for_create=for_create,
+                existing_target=existing_target,
+                preserve_existing_grants_when_none=preserve_existing_grants_when_none,
+            )
+        except AccessPermissionDeniedError as error:
+            raise SkillAuthorizationError(error.code) from error
+        except InvalidVisibilityConfigError as error:
+            raise SkillPackageError(error.code) from error
+
     async def _resolve_admin_create_visibility(
         self,
         actor: AuthContext,
@@ -764,31 +847,23 @@ class SkillService:
         if scope is SkillScope.PERSONAL:
             raise SkillPackageError("skill_scope_invalid")
 
-        try:
-            (
-                vis_scope,
-                resolved_department_id,
-                maybe_grants,
-            ) = await self._access_policy.resolve_and_validate_visibility(
-                user_id=user.id,
-                resource_type=ResourceType.SKILL,
-                visibility_scope=VisibilityScope(scope.value),
-                owner_department_id=owner_department_id,
-                visibility_grants=visibility_grants,
-                for_create=True,
-            )
-        except AccessPermissionDeniedError as error:
-            raise SkillAuthorizationError(error.code) from error
-        except InvalidVisibilityConfigError as error:
-            raise SkillPackageError(error.code) from error
+        vis_scope, resolved_department_id, maybe_grants = await self._validate_visibility(
+            user_id=user.id,
+            visibility_scope=VisibilityScope(scope.value),
+            owner_department_id=owner_department_id,
+            visibility_grants=visibility_grants,
+            for_create=True,
+        )
         return SkillScope(vis_scope.value), resolved_department_id, (maybe_grants or ())
 
-    async def _admin_details_for_replay(
+    async def _admin_markdown_replay_details(
         self,
         actor: AuthContext,
         replay: SkillImportRequestResult,
     ) -> SkillAdminDetails:
-        """幂等重放或新版本发布后返回包含完整版本历史与当前有效指针的管理详情。"""
+        """管理端 Markdown 幂等重放或发版后返回完整历史详情；若已被软删则稳定返回 404。"""
+        if replay.skill.deleted_at is not None:
+            raise SkillNotFoundError()
         return await self.get_admin(actor, replay.skill.id)
 
     async def _publish_zip_object[T](
@@ -827,8 +902,9 @@ class SkillService:
             # 事务内管理员复核失败统一映射为 403；提交态不明时不主动删除对象。
             raise SkillAuthorizationError("admin_required") from error
         except SkillConflictError:
-            replay = await self._replay_after_import_failure(
+            replay = await self._replay_after_failure(
                 actor,
+                personal=False,
                 operation=operation,
                 target_skill_id=target_skill_id,
                 idempotency_key=idempotency_key,
@@ -842,8 +918,9 @@ class SkillService:
             await self._discard_prepared_package(object_key)
             raise
         except Exception:
-            replay = await self._replay_after_import_failure(
+            replay = await self._replay_after_failure(
                 actor,
+                personal=False,
                 operation=operation,
                 target_skill_id=target_skill_id,
                 idempotency_key=idempotency_key,
@@ -860,57 +937,6 @@ class SkillService:
             # 并发写由唯一约束选出胜者，败者清理自己预写的未引用对象。
             await self._discard_prepared_package(object_key)
         return written
-
-    async def _publish_import(
-        self,
-        actor: AuthContext,
-        path: Path,
-        *,
-        idempotency_key: str,
-        request_fingerprint: str,
-        manifest: SkillPackageManifest,
-        package_sha256: str,
-        dependency_check: DependencyCheck,
-        scope: SkillScope = SkillScope.COMPANY,
-        owner_department_id: str | None = None,
-        visibility_grants: tuple[VisibilityGrantInput, ...] = (),
-    ) -> SkillAdminDetails:
-        """先写入首发包，再提交 Skill 身份、可见性授权和版本引用。"""
-        skill_id = self._id_factory("skill")
-        version_id = self._id_factory("skillver")
-
-        async def _write(object_key: str) -> SkillAdminDetails:
-            skill, version = await self._repository.create_skill(
-                skill_id=skill_id,
-                version_id=version_id,
-                label="v1",
-                manifest=manifest,
-                object_key=object_key,
-                package_sha256=package_sha256,
-                dependency_check=dependency_check,
-                actor=actor,
-                idempotency_key=idempotency_key,
-                request_fingerprint=request_fingerprint,
-                created_at=self._clock(),
-                scope=scope,
-                owner_department_id=owner_department_id,
-                visibility_grants=visibility_grants,
-            )
-            return SkillAdminDetails(skill, (version,))
-
-        return await self._publish_zip_object(
-            actor,
-            path,
-            operation="import",
-            target_skill_id=None,
-            version_id=version_id,
-            package_sha256=package_sha256,
-            idempotency_key=idempotency_key,
-            request_fingerprint=request_fingerprint,
-            write=_write,
-            extract_version_id=lambda details: details.versions[0].id,
-            replay_to_result=lambda replay: SkillAdminDetails(replay.skill, (replay.version,)),
-        )
 
     async def add_version(
         self,
@@ -946,51 +972,17 @@ class SkillService:
             scope=skill.scope.value,
             owner_department_id=skill.owner_department_id,
         )
-        try:
-            replay = await self._repository.find_import_result(
-                actor,
-                operation="add_version",
-                target_skill_id=skill_id,
-                idempotency_key=idempotency_key,
-                request_fingerprint=fingerprint,
-            )
-        except PermissionError as error:
-            # 与导入一致：提交前查询也不得把撤权泄漏成 500。
-            raise SkillAuthorizationError("admin_required") from error
+        replay = await self._find_admin_replay(
+            actor,
+            operation="add_version",
+            target_skill_id=skill_id,
+            idempotency_key=idempotency_key,
+            request_fingerprint=fingerprint,
+        )
         if replay is not None:
             # ZIP add_version 重放返回该幂等请求实际上传创建的版本（request_version）。
             return replay.request_version or replay.version
-        dependency_check = await asyncio.to_thread(
-            self._dependency_checker.check,
-            validated.manifest.dependencies,
-            checked_at=self._clock(),
-        )
-        return await self._publish_added_version(
-            actor,
-            skill_id,
-            path,
-            label=label,
-            idempotency_key=idempotency_key,
-            request_fingerprint=fingerprint,
-            manifest=validated.manifest,
-            package_sha256=validated.package_sha256,
-            dependency_check=dependency_check,
-        )
-
-    async def _publish_added_version(
-        self,
-        actor: AuthContext,
-        skill_id: str,
-        path: Path,
-        *,
-        label: str | None,
-        idempotency_key: str,
-        request_fingerprint: str,
-        manifest: SkillPackageManifest,
-        package_sha256: str,
-        dependency_check: DependencyCheck,
-    ) -> SkillVersion:
-        """先写入包对象，再追加版本并保留提交状态不明对象。"""
+        dependency_check = await self._check_dependencies(validated.manifest.dependencies)
         version_id = self._id_factory("skillver")
         return await self._publish_zip_object(
             actor,
@@ -998,20 +990,20 @@ class SkillService:
             operation="add_version",
             target_skill_id=skill_id,
             version_id=version_id,
-            package_sha256=package_sha256,
+            package_sha256=validated.package_sha256,
             idempotency_key=idempotency_key,
-            request_fingerprint=request_fingerprint,
+            request_fingerprint=fingerprint,
             write=lambda object_key: self._repository.add_version(
                 skill_id,
                 version_id=version_id,
                 label=label,
-                manifest=manifest,
+                manifest=validated.manifest,
                 object_key=object_key,
-                package_sha256=package_sha256,
+                package_sha256=validated.package_sha256,
                 dependency_check=dependency_check,
                 actor=actor,
                 idempotency_key=idempotency_key,
-                request_fingerprint=request_fingerprint,
+                request_fingerprint=fingerprint,
                 created_at=self._clock(),
             ),
             extract_version_id=lambda version: version.id,
@@ -1038,39 +1030,25 @@ class SkillService:
         )
         resolved_grants: tuple[VisibilityGrantInput, ...] | None = None
         if visibility_grants is not None:
-            try:
-                _, _, resolved_grants = await self._access_policy.resolve_and_validate_visibility(
-                    user_id=actor.user.id,
-                    resource_type=ResourceType.SKILL,
-                    visibility_scope=VisibilityScope(skill.scope.value),
-                    owner_department_id=skill.owner_department_id,
-                    visibility_grants=visibility_grants,
-                    for_create=False,
-                    existing_target=_skill_access_target(skill),
-                    preserve_existing_grants_when_none=False,
-                )
-            except AccessPermissionDeniedError as error:
-                raise SkillAuthorizationError(error.code) from error
-            except InvalidVisibilityConfigError as error:
-                raise SkillPackageError(error.code) from error
+            _, _, resolved_grants = await self._validate_visibility(
+                user_id=actor.user.id,
+                visibility_scope=VisibilityScope(skill.scope.value),
+                owner_department_id=skill.owner_department_id,
+                visibility_grants=visibility_grants,
+                for_create=False,
+                existing_target=_skill_access_target(skill),
+                preserve_existing_grants_when_none=False,
+            )
 
         version = await self._repository.get_version(current_version_id)
         if version is None or version.skill_id != skill_id:
             raise SkillNotFoundError("skill_version_not_found")
         if enabled:
             # 纯 Markdown 无依赖无脚本技能免于触发 Python 解释器子进程探测。
-            if (
-                skill.format is SkillFormat.MARKDOWN
-                and not version.dependency_requirements
-                and not version.manifest.scripts
-            ):
+            if _is_plain_markdown_skill(skill, version):
                 dependency_check = self._personal_dependency_check()
             else:
-                dependency_check = await asyncio.to_thread(
-                    self._dependency_checker.check,
-                    version.dependency_requirements,
-                    checked_at=self._clock(),
-                )
+                dependency_check = await self._check_dependencies(version.dependency_requirements)
                 if dependency_check.status is not DependencyCheckStatus.SATISFIED:
                     raise SkillDependencyUnsatisfiedError()
         else:
@@ -1189,19 +1167,12 @@ class SkillService:
                 available.append(skill)
                 continue
             # 纯 Markdown 无依赖无脚本技能直接放行，避免目录查询触发 Python 环境探测。
-            if (
-                skill.format is SkillFormat.MARKDOWN
-                and not version.dependency_requirements
-                and not version.manifest.scripts
-            ):
+            if _is_plain_markdown_skill(skill, version):
                 available.append(skill)
                 continue
             # GET 目录仅做只读实时过滤，严禁在此触发 record_dependency_check 写库；
             # 依赖检查持久化仅发生在导入、新增版本、配置修改与执行前显式复核。
-            check = await asyncio.to_thread(
-                self._dependency_checker.check_cached,
-                version.dependency_requirements,
-            )
+            check = await self._check_dependencies(version.dependency_requirements, cached=True)
             if check.status is DependencyCheckStatus.SATISFIED:
                 available.append(skill)
         return tuple(available)
@@ -1306,17 +1277,10 @@ class SkillService:
         use_cached_dependency_check: bool = False,
     ) -> tuple[SkillVersion, DependencyCheck]:
         """执行前复核依赖并仅在实质结果变化时写回数据库，消除 checked_at 导致的写放大。"""
-        if use_cached_dependency_check:
-            check = await asyncio.to_thread(
-                self._dependency_checker.check_cached,
-                version.dependency_requirements,
-            )
-        else:
-            check = await asyncio.to_thread(
-                self._dependency_checker.check,
-                version.dependency_requirements,
-                checked_at=self._clock(),
-            )
+        check = await self._check_dependencies(
+            version.dependency_requirements,
+            cached=use_cached_dependency_check,
+        )
         # 忽略仅 checked_at 推进、状态与包版本未变的探测结果，避免无意义 FOR UPDATE 写事务。
         if _dependency_check_changed(version.dependency_check, check):
             refreshed = await self._repository.record_dependency_check(version.id, check)
@@ -1420,25 +1384,30 @@ class SkillService:
             maximum_bytes=5 * 1024 * 1024,
         )
 
-    async def _authorize_admin(self, actor: AuthContext) -> None:
+    async def _authorize_roles(
+        self,
+        actor: AuthContext,
+        allowed_roles: frozenset[UserRole],
+    ) -> User:
+        """校验当前登录会话仍有效且具备允许的管理角色。"""
         user = await self._auth_reader.get_current_session_user(
             actor.user.id,
             actor.session_id,
             self._clock(),
         )
-        if user is None or user.role is not UserRole.SUPER_ADMIN:
+        if user is None or user.role not in allowed_roles:
             raise SkillAuthorizationError("admin_required")
+        return user
+
+    async def _authorize_admin(self, actor: AuthContext) -> None:
+        await self._authorize_roles(actor, frozenset({UserRole.SUPER_ADMIN}))
 
     async def _authorize_skill_manager(self, actor: AuthContext) -> User:
         """校验当前登录态为活跃超级管理员或部门管理员。"""
-        user = await self._auth_reader.get_current_session_user(
-            actor.user.id,
-            actor.session_id,
-            self._clock(),
+        return await self._authorize_roles(
+            actor,
+            frozenset({UserRole.SUPER_ADMIN, UserRole.DEPT_ADMIN}),
         )
-        if user is None or user.role not in {UserRole.SUPER_ADMIN, UserRole.DEPT_ADMIN}:
-            raise SkillAuthorizationError("admin_required")
-        return user
 
     async def _require_manageable_admin_skill(self, actor: AuthContext, skill_id: str) -> Skill:
         """校验管理端对目标 Skill 的访问权：不可读返回 404，可读但不可管理返回 403。"""
@@ -1466,32 +1435,6 @@ class SkillService:
             await self._object_store.delete(object_key)
         except Exception:
             pass
-
-    async def _replay_after_import_failure(
-        self,
-        actor: AuthContext,
-        *,
-        operation: str,
-        target_skill_id: str | None,
-        idempotency_key: str,
-        request_fingerprint: str,
-    ) -> SkillImportRequestResult | None:
-        """事务异常后读取幂等结果；普通查询失败视为提交状态不明。"""
-        try:
-            return await self._repository.find_import_result(
-                actor,
-                operation=operation,
-                target_skill_id=target_skill_id,
-                idempotency_key=idempotency_key,
-                request_fingerprint=request_fingerprint,
-            )
-        except asyncio.CancelledError:
-            raise
-        except PermissionError as error:
-            # 提交结果未知时仍必须优先反映管理员撤权，不能把回查撤权吞成普通失败。
-            raise SkillAuthorizationError("admin_required") from error
-        except Exception:
-            return None
 
     @staticmethod
     def _package_key(sha256: str, version_id: str) -> str:

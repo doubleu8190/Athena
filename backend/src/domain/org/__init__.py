@@ -27,7 +27,7 @@ from domain.org.model import (
     UserDepartmentSummary,
     UserOrgMembership,
 )
-from domain.org.ports import FeishuDirectoryClient, OrgMembershipReader, OrgRepository
+from domain.org.ports import FeishuDirectoryClient, OrgRepository
 
 __all__ = [
     "Department",
@@ -46,7 +46,6 @@ __all__ = [
     "MockUserDepartmentSeed",
     "OrgAuthorizationError",
     "OrgError",
-    "OrgMembershipReader",
     "OrgRepository",
     "OrgSyncValidationError",
     "OrgUserDetail",

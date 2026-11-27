@@ -95,7 +95,7 @@ function parseStrictArray<T>(
   const items: T[] = [];
   for (const item of value) {
     const parsed = parser(item);
-    if (!parsed) return null;
+    if (parsed === null) return null;
     items.push(parsed);
   }
   return items;
@@ -111,7 +111,7 @@ function parsePartitionedArray<T>(
   let hasInvalid = false;
   for (const item of value) {
     const parsed = parser(item);
-    if (parsed) items.push(parsed);
+    if (parsed !== null) items.push(parsed);
     else hasInvalid = true;
   }
   return { hasInvalid, items };

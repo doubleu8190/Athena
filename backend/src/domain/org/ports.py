@@ -22,18 +22,14 @@ from domain.org.model import (
 )
 
 
-class OrgMembershipReader(Protocol):
-    """认证接口所需的用户组织归属与管辖范围只读能力。"""
+class OrgRepository(Protocol):
+    """组织部门、归属关系、分权范围及通讯录原子同步持久化端口。"""
 
     async def get_user_org_membership(self, user_id: str) -> UserOrgMembership:
         """读取用户活跃部门列表及已授权管辖部门 ID 列表。"""
 
     async def list_active_mock_users(self) -> tuple[OrgUserDetail, ...]:
         """读取全部活跃的非生产 Mock 账号（含部门与管辖范围）。"""
-
-
-class OrgRepository(OrgMembershipReader, Protocol):
-    """组织部门、归属关系、分权范围及通讯录原子同步持久化端口。"""
 
     async def list_departments(
         self,
@@ -113,6 +109,5 @@ class FeishuDirectoryClient(Protocol):
 
 __all__ = [
     "FeishuDirectoryClient",
-    "OrgMembershipReader",
     "OrgRepository",
 ]

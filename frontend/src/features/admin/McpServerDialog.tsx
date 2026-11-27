@@ -1,5 +1,20 @@
 import { useEffect, useId, useRef, useState } from "react";
 
+import {
+  Button,
+  EMPTY_INLINE_CLASS,
+  FIELD_CLASS,
+  FIELD_INPUT_CLASS,
+  FIELD_TEXTAREA_CLASS,
+  FORM_STACK_CLASS,
+  ICON_BUTTON_CLASS,
+  ICON_BUTTON_DANGER_CLASS,
+  MODAL_WIDTH_XL,
+  NOTICE_BRAND_CLASS,
+  NOTICE_WARNING_CLASS,
+  PAGE_LOADING_CLASS,
+  cn,
+} from "../../shared/ui";
 import { ErrorBanner } from "../../shared/ui/ErrorBanner";
 import { FieldError } from "../../shared/ui/FieldError";
 import { Icon } from "../../shared/ui/Icons";
@@ -230,31 +245,31 @@ export function McpServerDialog({
       }
       footer={
         <>
-          <button
-            className="button-quiet"
+          <Button
             disabled={pending}
             onClick={close}
             type="button"
+            variant="outline"
           >
             取消
-          </button>
-          <button
-            className="button-primary"
+          </Button>
+          <Button
             disabled={pending || !editReady}
             form={formId}
             type="submit"
+            variant="primary"
           >
             {pending
               ? "正在连接并发现工具…"
               : editing
                 ? "完整替换并发现工具"
                 : "创建并发现工具"}
-          </button>
+          </Button>
         </>
       }
       onClose={close}
       open={open}
-      panelClassName="admin-modal admin-mcp-modal"
+      panelClassName={MODAL_WIDTH_XL}
       title={editing ? "编辑 MCP Server" : "新建 MCP Server"}
     >
       {editing && !editFormAvailable ? (
@@ -264,16 +279,13 @@ export function McpServerDialog({
             onRetry={() => void detail.refetch()}
           />
         ) : (
-          <div
-            className="page-loading admin-dialog-loading"
-            role="status"
-          >
+          <div className={PAGE_LOADING_CLASS} role="status">
             正在读取 Server 最新详情…
           </div>
         )
       ) : (
         <form
-          className="admin-form"
+          className={FORM_STACK_CLASS}
           id={formId}
           noValidate
           onSubmit={(event) => {
@@ -281,14 +293,17 @@ export function McpServerDialog({
             void handleSubmit();
           }}
         >
-          <fieldset disabled={pending || !editReady}>
+          <fieldset
+            className={cn(FORM_STACK_CLASS, "m-0 border-0 p-0")}
+            disabled={pending || !editReady}
+          >
             {editing ? (
-              <p className="admin-inline-warning">
+              <p className={cn(NOTICE_WARNING_CLASS, "font-semibold")}>
                 编辑是完整替换：必须重新输入全部秘密。未重新输入或显式移除的旧秘密会被删除。
               </p>
             ) : null}
 
-            <label className="workspace-field" htmlFor={fieldId("name")}>
+            <label className={FIELD_CLASS} htmlFor={fieldId("name")}>
               <span>Server 名称</span>
               <input
                 aria-describedby={
@@ -296,6 +311,7 @@ export function McpServerDialog({
                 }
                 aria-invalid={Boolean(errors.name)}
                 autoComplete="off"
+                className={FIELD_INPUT_CLASS}
                 data-autofocus
                 disabled={pending}
                 id={fieldId("name")}
@@ -309,35 +325,43 @@ export function McpServerDialog({
               id={fieldId("name-error")}
             />
 
-            <fieldset className="admin-transport-fieldset">
-              <legend>Transport</legend>
-              <div className="admin-segmented">
-                <label>
+            <fieldset className="m-0 border-0 p-0">
+              <legend className="mb-[7px] text-xs font-semibold text-text-primary">
+                Transport
+              </legend>
+              <div className="grid grid-cols-1 gap-[7px] sm:grid-cols-2">
+                <label className="relative min-w-0 cursor-pointer">
                   <input
                     checked={values.transport === "streamable_http"}
+                    className="peer sr-only"
                     disabled={pending}
                     name={`${formId}-transport`}
                     onChange={() => update("transport", "streamable_http")}
                     type="radio"
                   />
-                  <span>Streamable HTTP</span>
+                  <span className="flex min-h-10 items-center justify-center rounded-[9px] border border-border-default bg-canvas px-2.5 text-xs font-semibold text-text-secondary transition-colors peer-checked:border-brand-border peer-checked:bg-brand-subtle peer-checked:text-brand peer-focus-visible:outline-2 peer-focus-visible:outline-offset-2 peer-focus-visible:outline-ring-focus peer-disabled:cursor-not-allowed peer-disabled:opacity-55">
+                    Streamable HTTP
+                  </span>
                 </label>
-                <label>
+                <label className="relative min-w-0 cursor-pointer">
                   <input
                     checked={values.transport === "stdio"}
+                    className="peer sr-only"
                     disabled={pending}
                     name={`${formId}-transport`}
                     onChange={() => update("transport", "stdio")}
                     type="radio"
                   />
-                  <span>STDIO</span>
+                  <span className="flex min-h-10 items-center justify-center rounded-[9px] border border-border-default bg-canvas px-2.5 text-xs font-semibold text-text-secondary transition-colors peer-checked:border-brand-border peer-checked:bg-brand-subtle peer-checked:text-brand peer-focus-visible:outline-2 peer-focus-visible:outline-offset-2 peer-focus-visible:outline-ring-focus peer-disabled:cursor-not-allowed peer-disabled:opacity-55">
+                    STDIO
+                  </span>
                 </label>
               </div>
             </fieldset>
 
             {values.transport === "streamable_http" ? (
               <>
-                <label className="workspace-field" htmlFor={fieldId("url")}>
+                <label className={FIELD_CLASS} htmlFor={fieldId("url")}>
                   <span>HTTPS MCP URL</span>
                   <input
                     aria-describedby={
@@ -347,6 +371,7 @@ export function McpServerDialog({
                     }
                     aria-invalid={Boolean(errors.url)}
                     autoComplete="url"
+                    className={FIELD_INPUT_CLASS}
                     disabled={pending}
                     id={fieldId("url")}
                     onChange={(event) => update("url", event.target.value)}
@@ -364,14 +389,12 @@ export function McpServerDialog({
               </>
             ) : (
               <>
-                <label
-                  className="workspace-field"
-                  htmlFor={fieldId("command")}
-                >
+                <label className={FIELD_CLASS} htmlFor={fieldId("command")}>
                   <span>绝对命令路径</span>
                   <input
                     aria-invalid={Boolean(errors.command)}
                     autoComplete="off"
+                    className={FIELD_INPUT_CLASS}
                     disabled={pending}
                     id={fieldId("command")}
                     onChange={(event) =>
@@ -385,14 +408,12 @@ export function McpServerDialog({
                   error={errors.command}
                   id={fieldId("command-error")}
                 />
-                <label
-                  className="workspace-field"
-                  htmlFor={fieldId("cwd")}
-                >
+                <label className={FIELD_CLASS} htmlFor={fieldId("cwd")}>
                   <span>工作目录（可选，必须是绝对路径）</span>
                   <input
                     aria-invalid={Boolean(errors.cwd)}
                     autoComplete="off"
+                    className={FIELD_INPUT_CLASS}
                     disabled={pending}
                     id={fieldId("cwd")}
                     onChange={(event) => update("cwd", event.target.value)}
@@ -404,13 +425,11 @@ export function McpServerDialog({
                   error={errors.cwd}
                   id={fieldId("cwd-error")}
                 />
-                <label
-                  className="workspace-field"
-                  htmlFor={fieldId("args")}
-                >
+                <label className={FIELD_CLASS} htmlFor={fieldId("args")}>
                   <span>参数（每行一个，不使用 shell 引号）</span>
                   <textarea
                     aria-invalid={Boolean(errors.argsText)}
+                    className={FIELD_TEXTAREA_CLASS}
                     disabled={pending}
                     id={fieldId("args")}
                     onChange={(event) =>
@@ -429,19 +448,24 @@ export function McpServerDialog({
 
             <section
               aria-labelledby={fieldId("secrets-title")}
-              className="admin-secrets"
+              className="rounded-[10px] border border-border-default bg-subtle p-[13px]"
             >
-              <header className="admin-secrets-heading">
+              <header className="mb-2.5 flex flex-col items-start justify-between gap-3 sm:flex-row">
                 <div>
-                  <h3 id={fieldId("secrets-title")}>连接秘密</h3>
-                  <p>
+                  <h3
+                    className="text-xs font-bold text-text-primary"
+                    id={fieldId("secrets-title")}
+                  >
+                    连接秘密
+                  </h3>
+                  <p className="mt-[3px] text-xs text-text-tertiary">
                     {values.transport === "streamable_http"
                       ? "名称作为 HTTPS header，值只提交给后端。"
                       : "名称作为子进程环境变量，值只提交给后端。"}
                   </p>
                 </div>
-                <button
-                  className="button-quiet admin-secret-add"
+                <Button
+                  className="w-full sm:w-auto"
                   disabled={pending || !editReady}
                   onClick={() =>
                     setValues((current) => ({
@@ -449,28 +473,34 @@ export function McpServerDialog({
                       secrets: [...current.secrets, newSecretRow()],
                     }))
                   }
+                  size="sm"
                   type="button"
+                  variant="outline"
                 >
                   <Icon name="plus" size={13} />
                   添加秘密
-                </button>
+                </Button>
               </header>
 
               {values.secrets.length === 0 ? (
-                <p className="admin-empty-inline">
+                <p className={EMPTY_INLINE_CLASS}>
                   当前没有秘密。需要认证的 Server 请添加对应名称和值。
                 </p>
               ) : (
-                <div className="admin-secret-list">
+                <div className="flex flex-col gap-[9px]">
                   {values.secrets.map((row, index) => (
-                    <div className="admin-secret-row" key={row.id}>
+                    <div
+                      className="grid grid-cols-[minmax(0,1fr)_auto] items-start gap-2 rounded-[9px] border border-border-default bg-canvas p-2.5 sm:grid-cols-[minmax(0,0.9fr)_minmax(0,1.1fr)_auto] sm:items-end"
+                      key={row.id}
+                    >
                       <label
-                        className="workspace-field"
+                        className={cn(FIELD_CLASS, "col-start-1 sm:col-start-auto")}
                         htmlFor={`${row.id}-name`}
                       >
                         <span>秘密名称 {index + 1}</span>
                         <input
                           autoComplete="off"
+                          className={FIELD_INPUT_CLASS}
                           disabled={pending}
                           id={`${row.id}-name`}
                           onChange={(event) =>
@@ -483,7 +513,10 @@ export function McpServerDialog({
                         />
                       </label>
                       <label
-                        className="workspace-field"
+                        className={cn(
+                          FIELD_CLASS,
+                          "col-start-1 row-start-2 sm:col-start-auto sm:row-start-auto",
+                        )}
                         htmlFor={`${row.id}-value`}
                       >
                         <span>
@@ -491,6 +524,7 @@ export function McpServerDialog({
                         </span>
                         <input
                           autoComplete="new-password"
+                          className={FIELD_INPUT_CLASS}
                           disabled={pending}
                           id={`${row.id}-value`}
                           onChange={(event) =>
@@ -504,7 +538,11 @@ export function McpServerDialog({
                       </label>
                       <button
                         aria-label={`移除秘密 ${row.name || index + 1}`}
-                        className="icon-button icon-button--danger admin-secret-remove"
+                        className={cn(
+                          ICON_BUTTON_CLASS,
+                          ICON_BUTTON_DANGER_CLASS,
+                          "col-start-2 row-start-1 mt-[30px] sm:col-start-auto sm:row-start-auto sm:mt-0 sm:mb-[4.5px]",
+                        )}
                         disabled={pending}
                         onClick={() => removeSecret(row.id)}
                         title="移除秘密"
@@ -524,12 +562,18 @@ export function McpServerDialog({
           </fieldset>
 
           {editing && configVersion !== null ? (
-            <p className="admin-form-help">
+            <p className="text-xs leading-[1.65] text-text-tertiary">
               本次提交的 expected_config_version：{configVersion}
             </p>
           ) : null}
           {pending ? (
-            <p className="admin-connection-status" role="status">
+            <p
+              className={cn(
+                NOTICE_BRAND_CLASS,
+                "before:mt-1 before:h-[7px] before:w-[7px] before:shrink-0 before:animate-pulse before:rounded-full before:bg-current before:content-['']",
+              )}
+              role="status"
+            >
               正在连接 MCP Server 并发现工具。后端完成前不会显示连接成功；配置结果以服务端响应为准。
             </p>
           ) : null}

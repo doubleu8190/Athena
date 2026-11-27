@@ -4,7 +4,28 @@ import { useSearchParams } from "react-router-dom";
 import { getAuthIdentityEpoch } from "../../shared/api/client";
 import { formatDateTime } from "../../shared/lib/format";
 import { parsePage } from "../../shared/lib/pagination";
-import { VisibilityBadge } from "../../shared/ui";
+import {
+  ADMIN_CARD_ACTIONS_CLASS,
+  ADMIN_CARD_CLASS,
+  ADMIN_CARD_HEADING_CLASS,
+  ADMIN_CARD_LIST_CLASS,
+  ADMIN_DATA_COUNT_CLASS,
+  ADMIN_DETAIL_GRID_CLASS,
+  ADMIN_MUTED_CLASS,
+  ADMIN_SECTION_CLASS,
+  ADMIN_SECTION_HEADING_CLASS,
+  ADMIN_TITLE_LINE_CLASS,
+  Badge,
+  Button,
+  PAGE_DESC_CLASS,
+  PAGE_HEADING_CLASS,
+  PAGE_HEADING_COPY_CLASS,
+  PAGE_LOADING_CLASS,
+  PAGE_SHELL_CLASS,
+  PAGE_TITLE_CLASS,
+  VisibilityBadge,
+  cn,
+} from "../../shared/ui";
 import { EmptyState } from "../../shared/ui/EmptyState";
 import { ErrorBanner } from "../../shared/ui/ErrorBanner";
 import { Icon } from "../../shared/ui/Icons";
@@ -91,28 +112,28 @@ export function AdminSubagentsPage() {
   };
 
   return (
-    <div className="page-shell admin-page admin-subagents-page">
-      <header className="page-heading">
-        <div className="page-heading-copy">
-          <h1>子智能体管理</h1>
-          <p className="page-description">
+    <div className={cn(PAGE_SHELL_CLASS, "min-w-0")}>
+      <header className={PAGE_HEADING_CLASS}>
+        <div className={PAGE_HEADING_COPY_CLASS}>
+          <h1 className={PAGE_TITLE_CLASS}>子智能体管理</h1>
+          <p className={PAGE_DESC_CLASS}>
             配置可被主智能体异步派发的子智能体。每个子智能体拥有独立系统提示词、可选绑定模型与最小工具权限白名单。
           </p>
         </div>
-        <button
-          className="button-primary"
+        <Button
           onClick={() => setCreateOpen(true)}
           type="button"
+          variant="primary"
         >
           <Icon name="plus" size={14} />
           新建子智能体
-        </button>
+        </Button>
       </header>
 
       {actionError ? <ErrorBanner message={actionError} /> : null}
 
       {subagents.isPending ? (
-        <div className="page-loading" role="status">
+        <div className={PAGE_LOADING_CLASS} role="status">
           正在读取子智能体配置…
         </div>
       ) : subagents.isError ? (
@@ -123,13 +144,13 @@ export function AdminSubagentsPage() {
       ) : subagents.data.items.length === 0 && page === 1 ? (
         <EmptyState
           action={
-            <button
-              className="button-primary"
+            <Button
               onClick={() => setCreateOpen(true)}
               type="button"
+              variant="primary"
             >
               新建第一个子智能体
-            </button>
+            </Button>
           }
           description="创建并启用子智能体后，主智能体在对话中可通过 dispatch_subagents 并发派发专业子任务。"
           icon="spark"
@@ -138,18 +159,18 @@ export function AdminSubagentsPage() {
       ) : (
         <section
           aria-labelledby="subagent-list-title"
-          className="admin-section"
+          className={ADMIN_SECTION_CLASS}
         >
-          <header className="admin-section-heading">
+          <header className={ADMIN_SECTION_HEADING_CLASS}>
             <div>
               <h2 id="subagent-list-title">子智能体目录</h2>
             </div>
-            <span className="admin-data-count">
+            <span className={ADMIN_DATA_COUNT_CLASS}>
               共 {subagents.data.total} 个子智能体
             </span>
           </header>
 
-          <ul className="admin-server-list">
+          <ul className={ADMIN_CARD_LIST_CLASS}>
             {subagents.data.items.map((subagent) => {
               const toggling =
                 toggleEnabled.isPending &&
@@ -160,22 +181,23 @@ export function AdminSubagentsPage() {
                 : "跟随系统默认";
 
               return (
-                <li className="admin-server-card admin-subagent-card" key={subagent.id}>
-                  <div className="admin-card-heading">
-                    <div>
-                      <div className="admin-title-line">
+                <li className={ADMIN_CARD_CLASS} key={subagent.id}>
+                  <div className={ADMIN_CARD_HEADING_CLASS}>
+                    <div className="min-w-0">
+                      <div className={ADMIN_TITLE_LINE_CLASS}>
                         <h3>{subagent.name}</h3>
-                        <code className="admin-slug-badge">{subagent.slug}</code>
-                        <span
-                          className={`admin-status-badge${
-                            subagent.enabled ? " is-accent" : ""
-                          }`}
+                        <code className="max-w-full rounded-md border border-border-default bg-subtle px-[7px] py-0.5 text-xs text-text-secondary [overflow-wrap:anywhere]">
+                          {subagent.slug}
+                        </code>
+                        <Badge
+                          className="rounded-full"
+                          variant={subagent.enabled ? "brand" : "neutral"}
                         >
                           {subagent.enabled ? "已启用" : "已停用"}
-                        </span>
-                        <span className="admin-status-badge">
+                        </Badge>
+                        <Badge className="rounded-full" variant="neutral">
                           v{subagent.version}
-                        </span>
+                        </Badge>
                         <VisibilityBadge
                           departmentName={
                             subagent.visibility_scope === "department"
@@ -185,11 +207,18 @@ export function AdminSubagentsPage() {
                           scope={subagent.visibility_scope}
                         />
                       </div>
-                      <p className="admin-muted">{subagent.description}</p>
+                      <p
+                        className={cn(
+                          ADMIN_MUTED_CLASS,
+                          "mt-1.5 [overflow-wrap:anywhere]",
+                        )}
+                      >
+                        {subagent.description}
+                      </p>
                     </div>
                   </div>
 
-                  <dl className="admin-detail-grid">
+                  <dl className={ADMIN_DETAIL_GRID_CLASS}>
                     <div>
                       <dt>绑定模型</dt>
                       <dd>{boundModelLabel}</dd>
@@ -214,39 +243,47 @@ export function AdminSubagentsPage() {
                   </dl>
 
                   {/* 操作统一放在卡片底部，避免长名称和元数据挤压按钮。 */}
-                  <div className="admin-card-actions admin-subagent-card-actions">
-                    <button
+                  <div
+                    className={cn(
+                      ADMIN_CARD_ACTIONS_CLASS,
+                      "flex-wrap justify-end",
+                    )}
+                  >
+                    <Button
                       aria-label={`${subagent.enabled ? "停用" : "启用"}子智能体：${subagent.name}`}
                       aria-pressed={subagent.enabled}
-                      className="button-quiet"
                       disabled={toggling}
                       onClick={() => void handleToggleEnabled(subagent)}
+                      size="sm"
                       type="button"
+                      variant="outline"
                     >
                       {toggling
                         ? "处理中…"
                         : subagent.enabled
                           ? "停用"
                           : "启用"}
-                    </button>
-                    <button
+                    </Button>
+                    <Button
                       aria-label={`编辑子智能体：${subagent.name}`}
-                      className="button-quiet"
                       onClick={() => setEditSubagentId(subagent.id)}
+                      size="sm"
                       type="button"
+                      variant="outline"
                     >
                       <Icon name="edit" size={14} />
                       编辑
-                    </button>
-                    <button
+                    </Button>
+                    <Button
                       aria-label={`删除子智能体：${subagent.name}`}
-                      className="button-danger-outline"
                       onClick={() => setDeleteTarget(subagent)}
+                      size="sm"
                       type="button"
+                      variant="danger-outline"
                     >
                       <Icon name="trash" size={14} />
                       删除
-                    </button>
+                    </Button>
                   </div>
                 </li>
               );
@@ -281,22 +318,22 @@ export function AdminSubagentsPage() {
         description="删除后该子智能体将不可再被调度，历史运行记录不受影响。"
         footer={
           <>
-            <button
-              className="button-quiet"
+            <Button
               disabled={deleteMutation.isPending}
               onClick={() => setDeleteTarget(null)}
               type="button"
+              variant="outline"
             >
               取消
-            </button>
-            <button
-              className="button-danger"
+            </Button>
+            <Button
               disabled={deleteMutation.isPending}
               onClick={() => void handleDelete()}
               type="button"
+              variant="danger"
             >
               {deleteMutation.isPending ? "正在删除…" : "确认删除"}
-            </button>
+            </Button>
           </>
         }
         onClose={() => {

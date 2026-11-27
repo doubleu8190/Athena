@@ -15,6 +15,7 @@ import pytest
 from alembic import command
 from alembic.config import Config
 from alembic.script import ScriptDirectory
+from auth_support import FakePasswordHasher
 from fastapi.testclient import TestClient
 from pg_unit_harness import create_pg_unit_db
 from sqlalchemy import DateTime, delete, func, literal, select, update
@@ -101,18 +102,6 @@ SECRET_KEY = b"0" * 32
 def _run[T](coroutine: Coroutine[Any, Any, T]) -> T:
     """在同步测试函数中运行协程。"""
     return asyncio.run(coroutine)
-
-
-class _FakePasswordHasher:
-    """确定性快速密码校验器，用于创建真实 Cookie 登录态。"""
-
-    dummy_hash = "fake:dummy"
-
-    def hash_password(self, password: str) -> str:
-        return f"fake:{password}"
-
-    def verify_password(self, password: str, password_hash: str) -> bool:
-        return password_hash == f"fake:{password}"
 
 
 class _EmptyMcpCatalog:
@@ -1099,7 +1088,7 @@ def test_run_submit_api_validates_explicit_kb_ids_fingerprint_and_model_profile(
                 )
 
             auth_repo = SqlAlchemyAuthRepository(factory)
-            auth_service = AuthService(auth_repo, _FakePasswordHasher())
+            auth_service = AuthService(auth_repo, FakePasswordHasher())
             project_service = ProjectService(SqlAlchemyProjectRepository(factory))
             session_service = SessionService(SqlAlchemySessionRepository(factory))
             message_repo = SqlAlchemyMessageRepository(factory)
@@ -1339,7 +1328,7 @@ def test_models_catalog_filters_unready_dialogue_models_and_hides_unready_defaul
                 )
 
             auth_repo = SqlAlchemyAuthRepository(factory)
-            auth_service = AuthService(auth_repo, _FakePasswordHasher())
+            auth_service = AuthService(auth_repo, FakePasswordHasher())
             profile_service = ModelProfileService(
                 SqlAlchemyModelProfileRepository(factory, cipher),
                 auth_repo,
@@ -1416,7 +1405,7 @@ def test_run_retry_inherits_and_revalidates_model_and_kb_and_submit_replay_is_id
                 )
 
             auth_repo = SqlAlchemyAuthRepository(factory)
-            auth_service = AuthService(auth_repo, _FakePasswordHasher())
+            auth_service = AuthService(auth_repo, FakePasswordHasher())
             project_service = ProjectService(SqlAlchemyProjectRepository(factory))
             session_service = SessionService(SqlAlchemySessionRepository(factory))
             message_repo = SqlAlchemyMessageRepository(factory)
@@ -1691,7 +1680,7 @@ def test_project_upgrade_detach_delete_session_rebind_and_escaped_search(
                 )
 
             access_policy = AccessPolicyService(SqlAlchemyAccessControlRepository(factory))
-            auth_service = AuthService(SqlAlchemyAuthRepository(factory), _FakePasswordHasher())
+            auth_service = AuthService(SqlAlchemyAuthRepository(factory), FakePasswordHasher())
             project_repo = SqlAlchemyProjectRepository(factory)
             project_service = ProjectService(project_repo)
             session_service = SessionService(SqlAlchemySessionRepository(factory))

@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Protocol
 
-from domain.auth.model.entity import AuthContext, AuthSession, User
+from domain.auth.model import AuthContext, AuthSession, User
 
 
 class PasswordHasher(Protocol):

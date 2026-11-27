@@ -12,6 +12,7 @@ from urllib.parse import parse_qs, urlsplit
 
 import httpx2
 import pytest
+from auth_support import FakePasswordHasher
 from cli.bootstrap_super_admin import bootstrap_super_admin
 from cli.sync_feishu_org import run_feishu_org_sync
 from fastapi.testclient import TestClient
@@ -98,16 +99,6 @@ class _FakeRedisStateBackend:
         if self.now[0] >= expires_at:
             return None
         return payload
-
-
-class _FakePasswordHasher:
-    dummy_hash = "fake:dummy"
-
-    def hash_password(self, password: str) -> str:
-        return f"fake:{password}"
-
-    def verify_password(self, password: str, password_hash: str) -> bool:
-        return password_hash != self.dummy_hash and password_hash == f"fake:{password}"
 
 
 async def _make_pg_db() -> tuple[Any, async_sessionmaker[AsyncSession]]:
@@ -894,7 +885,7 @@ def test_feishu_sso_authorize_callback_replay_and_disabled_revocation() -> None:
         state_store = InMemoryOAuthStateStore()
         auth_service = AuthService(
             auth_repo,
-            _FakePasswordHasher(),
+            FakePasswordHasher(),
             org_reader=org_repo,
             feishu_client=feishu_client,
             oauth_state_store=state_store,
@@ -1071,7 +1062,7 @@ def test_feishu_org_sync_computes_paths_preserves_db_on_cycle_and_revokes_depart
             org_repo = SqlAlchemyOrgRepository(session_factory)
             auth_service = AuthService(
                 auth_repo,
-                _FakePasswordHasher(),
+                FakePasswordHasher(),
                 org_reader=org_repo,
                 clock=lambda: now,
             )
@@ -1402,7 +1393,7 @@ def test_feishu_sync_aborts_on_empty_departments_or_empty_employees_fuse() -> No
         org_repo = SqlAlchemyOrgRepository(session_factory)
         auth_service = AuthService(
             auth_repo,
-            _FakePasswordHasher(),
+            FakePasswordHasher(),
             org_reader=org_repo,
             clock=lambda: now,
         )
@@ -1529,7 +1520,7 @@ def test_feishu_callback_sanitizes_c1_control_chars_and_overlong_display_names()
         )
         auth_service = AuthService(
             auth_repo,
-            _FakePasswordHasher(),
+            FakePasswordHasher(),
             org_reader=org_repo,
             feishu_client=stub_client,
             oauth_state_store=InMemoryOAuthStateStore(),

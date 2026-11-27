@@ -6,7 +6,7 @@ from collections.abc import Callable, Sequence
 from datetime import datetime
 from typing import NoReturn
 
-from sqlalchemy import delete, func, select
+from sqlalchemy import ColumnElement, delete, func, select
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -26,7 +26,13 @@ from adapter.mcp.converter import (
 from adapter.mcp.model import McpServerModel, McpToolModel
 from common.date import utc_now
 from common.unset import UNSET
-from domain.access import ResourceType, UserAccessSnapshot, VisibilityGrant, VisibilityScope
+from domain.access import (
+    ResourceType,
+    UserAccessSnapshot,
+    VisibilityGrant,
+    VisibilityGrantInput,
+    VisibilityScope,
+)
 from domain.auth import AuthContext, UserRole
 from domain.mcp import (
     McpAuthorizationChangedError,
@@ -111,15 +117,11 @@ class SqlAlchemyMcpRepository(McpServerRepository, McpToolRuntimeReader):
                     session.add(row)
                     await session.flush()
                     self._insert_tools(session, server.id, tools, now)
-                    grants = await sync_resource_grants_in_session(
+                    grants = await self._sync_server_grants(
                         session,
-                        ResourceType.MCP_SERVER,
                         server.id,
-                        (
-                            server.visibility_grants
-                            if server.visibility_scope is VisibilityScope.DEPARTMENT
-                            else ()
-                        ),
+                        server.visibility_scope,
+                        server.visibility_grants,
                         now=now,
                     )
                     await session.flush()
@@ -143,63 +145,15 @@ class SqlAlchemyMcpRepository(McpServerRepository, McpToolRuntimeReader):
         tools: Sequence[ToolDefinition],
     ) -> McpServer:
         """锁定未软删 Server 后比较版本，并原子替换配置、秘密及工具快照。"""
-        if replacement.id != server_id or expected_config_version < 1:
-            raise ValueError("mcp_config_invalid")
-        sealed = self._seal(replacement)
-        now = self._clock()
-        self._validate_tools(server_id, tools)
-        try:
-            async with self._session_factory() as session:
-                async with session.begin():
-                    await self._require_admin(session, actor)
-                    row = await session.scalar(
-                        select(McpServerModel)
-                        .where(
-                            McpServerModel.id == server_id,
-                            McpServerModel.deleted_at.is_(None),
-                        )
-                        .with_for_update()
-                        .execution_options(populate_existing=True)
-                    )
-                    if row is None:
-                        raise McpServerNotFoundError("mcp_server_not_found")
-                    if row.config_version != expected_config_version:
-                        raise McpConfigVersionConflictError("mcp_config_version_conflict")
-                    self._decrypt_secrets(row)
-                    row.name = replacement.name.strip()
-                    row.transport = replacement.config.transport
-                    row.config_json = self._config_json(replacement)
-                    row.secrets_ciphertext = sealed.ciphertext if sealed else None
-                    row.secrets_nonce = sealed.nonce if sealed else None
-                    row.key_version = sealed.key_version if sealed else None
-                    row.visibility_scope = replacement.visibility_scope.value
-                    row.owner_department_id = replacement.owner_department_id
-                    row.config_version += 1
-                    row.updated_at = now
-                    row.tools_discovered_at = now
-                    await self._align_server_tools_in_session(session, server_id, tools, now)
-                    grants = await sync_resource_grants_in_session(
-                        session,
-                        ResourceType.MCP_SERVER,
-                        server_id,
-                        (
-                            replacement.visibility_grants
-                            if replacement.visibility_scope is VisibilityScope.DEPARTMENT
-                            else ()
-                        ),
-                        now=now,
-                    )
-                    await session.flush()
-                    # 既有密文已于替换前认证校验，此处直接透传新写入的 replacement.secrets 键名。
-                    return self._server_projection(
-                        row,
-                        secret_names=tuple(sorted(replacement.secrets)),
-                        grants=grants,
-                    )
-        except IntegrityError as error:
-            self._raise_integrity_domain_error(error)
-        except SQLAlchemyError:
-            raise McpCatalogPersistenceError("mcp_catalog_persistence_failed") from None
+        return await self._update_server_record(
+            actor,
+            server_id,
+            expected_config_version,
+            replacement,
+            enabled=None,
+            sync_grants=True,
+            rediscovered_tools=tools,
+        )
 
     async def patch_server(
         self,
@@ -213,7 +167,31 @@ class SqlAlchemyMcpRepository(McpServerRepository, McpToolRuntimeReader):
         rediscovered_tools: Sequence[ToolDefinition] | None = None,
     ) -> McpServer:
         """CAS 锁行后原子写入保密合并配置；rediscovered_tools 为 None 时保留既有工具目录。"""
-        if replacement.id != server_id or expected_config_version < 1 or type(enabled) is not bool:
+        if type(enabled) is not bool:
+            raise ValueError("mcp_config_invalid")
+        return await self._update_server_record(
+            actor,
+            server_id,
+            expected_config_version,
+            replacement,
+            enabled=enabled,
+            sync_grants=sync_grants,
+            rediscovered_tools=rediscovered_tools,
+        )
+
+    async def _update_server_record(
+        self,
+        actor: AuthContext,
+        server_id: str,
+        expected_config_version: int,
+        replacement: McpServerWrite,
+        *,
+        enabled: bool | None,
+        sync_grants: bool,
+        rediscovered_tools: Sequence[ToolDefinition] | None,
+    ) -> McpServer:
+        """在单事务 CAS 行锁内统一执行 Server 配置替换/局部更新、工具对齐与授权同步。"""
+        if replacement.id != server_id or expected_config_version < 1:
             raise ValueError("mcp_config_invalid")
         sealed = self._seal(replacement)
         now = self._clock()
@@ -223,19 +201,11 @@ class SqlAlchemyMcpRepository(McpServerRepository, McpToolRuntimeReader):
             async with self._session_factory() as session:
                 async with session.begin():
                     await self._require_admin(session, actor)
-                    row = await session.scalar(
-                        select(McpServerModel)
-                        .where(
-                            McpServerModel.id == server_id,
-                            McpServerModel.deleted_at.is_(None),
-                        )
-                        .with_for_update()
-                        .execution_options(populate_existing=True)
+                    row = await self._lock_active_server(
+                        session,
+                        server_id,
+                        expected_config_version=expected_config_version,
                     )
-                    if row is None:
-                        raise McpServerNotFoundError("mcp_server_not_found")
-                    if row.config_version != expected_config_version:
-                        raise McpConfigVersionConflictError("mcp_config_version_conflict")
                     # 先校验既有密文完整性，避免损坏密文被静默覆盖。
                     self._decrypt_secrets(row)
                     row.name = replacement.name.strip()
@@ -246,32 +216,26 @@ class SqlAlchemyMcpRepository(McpServerRepository, McpToolRuntimeReader):
                     row.key_version = sealed.key_version if sealed else None
                     row.visibility_scope = replacement.visibility_scope.value
                     row.owner_department_id = replacement.owner_department_id
-                    row.enabled = enabled
+                    if enabled is not None:
+                        row.enabled = enabled
                     row.config_version += 1
                     row.updated_at = now
                     if rediscovered_tools is not None:
-                        # rediscover=True 时按 remote_name 增量对齐工具，完整保留存活工具元信息。
+                        # 按 remote_name 增量对齐工具快照，完整保留存活工具的身份与审批展示元信息。
                         row.tools_discovered_at = now
                         await self._align_server_tools_in_session(
                             session, server_id, rediscovered_tools, now
                         )
                     if sync_grants:
-                        grants = await sync_resource_grants_in_session(
+                        grants = await self._sync_server_grants(
                             session,
-                            ResourceType.MCP_SERVER,
                             server_id,
-                            (
-                                replacement.visibility_grants
-                                if replacement.visibility_scope is VisibilityScope.DEPARTMENT
-                                else ()
-                            ),
+                            replacement.visibility_scope,
+                            replacement.visibility_grants,
                             now=now,
                         )
                     else:
-                        grants_map = await load_grants_map_in_session(
-                            session, ResourceType.MCP_SERVER, (server_id,)
-                        )
-                        grants = grants_map.get(server_id, ())
+                        grants = await self._load_server_grants(session, server_id)
                     await session.flush()
                     # 既有密文已于替换前认证校验，此处直接透传新写入的 replacement.secrets 键名。
                     return self._server_projection(
@@ -304,35 +268,22 @@ class SqlAlchemyMcpRepository(McpServerRepository, McpToolRuntimeReader):
             async with self._session_factory() as session:
                 async with session.begin():
                     await self._require_admin(session, actor)
-                    row = await session.scalar(
-                        select(McpServerModel)
-                        .where(
-                            McpServerModel.id == server_id,
-                            McpServerModel.deleted_at.is_(None),
-                        )
-                        .with_for_update()
-                        .execution_options(populate_existing=True)
+                    row = await self._lock_active_server(
+                        session,
+                        server_id,
+                        expected_config_version=expected_config_version,
                     )
-                    if row is None:
-                        raise McpServerNotFoundError("mcp_server_not_found")
-                    if (
-                        expected_config_version is not None
-                        and row.config_version != expected_config_version
-                    ):
-                        raise McpConfigVersionConflictError("mcp_config_version_conflict")
                     secrets = self._decrypt_secrets(row)
                     row.enabled = enabled
                     row.updated_at = now
                     row.config_version += 1
                     await session.flush()
-                    grants_map = await load_grants_map_in_session(
-                        session, ResourceType.MCP_SERVER, (server_id,)
-                    )
+                    grants = await self._load_server_grants(session, server_id)
                     # 启停操作未修改密文，复用已认证解密得到的键名避免同一事务内重复解密。
                     return self._server_projection(
                         row,
                         secret_names=tuple(sorted(secrets)),
-                        grants=grants_map.get(server_id, ()),
+                        grants=grants,
                     )
         except SQLAlchemyError:
             raise McpCatalogPersistenceError("mcp_catalog_persistence_failed") from None
@@ -353,33 +304,23 @@ class SqlAlchemyMcpRepository(McpServerRepository, McpToolRuntimeReader):
             async with self._session_factory() as session:
                 async with session.begin():
                     await self._require_admin(session, actor)
-                    row = await session.scalar(
-                        select(McpServerModel)
-                        .where(
-                            McpServerModel.id == server_id,
-                            McpServerModel.deleted_at.is_(None),
-                        )
-                        .with_for_update()
-                        .execution_options(populate_existing=True)
+                    row = await self._lock_active_server(
+                        session,
+                        server_id,
+                        expected_config_version=expected_config_version,
                     )
-                    if row is None:
-                        raise McpServerNotFoundError("mcp_server_not_found")
-                    if row.config_version != expected_config_version:
-                        raise McpConfigVersionConflictError("mcp_config_version_conflict")
                     secrets = self._decrypt_secrets(row)
                     await self._align_server_tools_in_session(session, server_id, tools, now)
                     row.tools_discovered_at = now
                     row.updated_at = now
                     row.config_version += 1
                     await session.flush()
-                    grants_map = await load_grants_map_in_session(
-                        session, ResourceType.MCP_SERVER, (server_id,)
-                    )
+                    grants = await self._load_server_grants(session, server_id)
                     # 工具同步未修改密文，复用已认证解密得到的键名避免同一事务内重复解密。
                     return self._server_projection(
                         row,
                         secret_names=tuple(sorted(secrets)),
-                        grants=grants_map.get(server_id, ()),
+                        grants=grants,
                     )
         except IntegrityError as error:
             self._raise_integrity_domain_error(error)
@@ -393,16 +334,11 @@ class SqlAlchemyMcpRepository(McpServerRepository, McpToolRuntimeReader):
             async with self._session_factory() as session:
                 async with session.begin():
                     await self._require_admin(session, actor)
-                    row = await session.scalar(
-                        select(McpServerModel)
-                        .where(
-                            McpServerModel.id == server_id,
-                            McpServerModel.deleted_at.is_(None),
-                        )
-                        .with_for_update()
+                    row = await self._lock_active_server(
+                        session,
+                        server_id,
+                        populate_existing=False,
                     )
-                    if row is None:
-                        raise McpServerNotFoundError("mcp_server_not_found")
                     # 清理授权与名下全部工具，释放 model_name 唯一约束并确保工具即刻下线。
                     await delete_resource_grants_in_session(
                         session, ResourceType.MCP_SERVER, server_id
@@ -521,39 +457,21 @@ class SqlAlchemyMcpRepository(McpServerRepository, McpToolRuntimeReader):
     async def get(self, server_id: str) -> McpServer | None:
         """读取单个未软删 Server 的安全投影。"""
         async with self._session_factory() as session:
-            row = await session.scalar(
-                select(McpServerModel).where(
-                    McpServerModel.id == server_id,
-                    McpServerModel.deleted_at.is_(None),
-                )
-            )
+            row = await self._get_active_server(session, server_id)
             if row is None:
                 return None
-            grants_map = await load_grants_map_in_session(
-                session, ResourceType.MCP_SERVER, (row.id,)
-            )
-            return self._server_projection(row, grants=grants_map.get(row.id, ()))
+            grants = await self._load_server_grants(session, row.id)
+            return self._server_projection(row, grants=grants)
 
     async def get_connection_state(self, server_id: str) -> McpServerConnectionState | None:
         """读取未软删 Server 及已解封凭据，仅供内部保密局部更新和独立重发现使用。"""
         async with self._session_factory() as session:
-            row = await session.scalar(
-                select(McpServerModel).where(
-                    McpServerModel.id == server_id,
-                    McpServerModel.deleted_at.is_(None),
-                )
-            )
+            row = await self._get_active_server(session, server_id)
             if row is None:
                 return None
             secrets = self._decrypt_secrets(row)
-            grants_map = await load_grants_map_in_session(
-                session, ResourceType.MCP_SERVER, (row.id,)
-            )
-            server = server_to_domain(
-                row,
-                tuple(sorted(secrets)),
-                grants=grants_map.get(row.id, ()),
-            )
+            grants = await self._load_server_grants(session, row.id)
+            server = server_to_domain(row, tuple(sorted(secrets)), grants=grants)
             return McpServerConnectionState(server=server, secrets=secrets)
 
     async def list_readable_runtime_tools(
@@ -578,14 +496,7 @@ class SqlAlchemyMcpRepository(McpServerRepository, McpToolRuntimeReader):
                     .where(
                         McpServerModel.deleted_at.is_(None),
                         McpServerModel.enabled.is_(True),
-                        build_readable_resource_clause(
-                            snapshot,
-                            ResourceType.MCP_SERVER,
-                            id_col=McpServerModel.id,
-                            scope_col=McpServerModel.visibility_scope,
-                            owner_id_col=None,
-                            owner_department_id_col=McpServerModel.owner_department_id,
-                        ),
+                        self._readable_server_clause(snapshot),
                     )
                     .order_by(McpToolModel.server_id, McpToolModel.model_name)
                     .limit(limit)
@@ -712,44 +623,14 @@ class SqlAlchemyMcpRepository(McpServerRepository, McpToolRuntimeReader):
             )
             if resolved is None or not resolved.is_active:
                 return ToolPage(items=(), total=0)
-            readable_clause = build_readable_resource_clause(
-                resolved,
-                ResourceType.MCP_SERVER,
-                id_col=McpServerModel.id,
-                scope_col=McpServerModel.visibility_scope,
-                owner_id_col=None,
-                owner_department_id_col=McpServerModel.owner_department_id,
-            )
-            total = int(
-                await session.scalar(
-                    select(func.count())
-                    .select_from(McpToolModel)
-                    .join(McpServerModel, McpServerModel.id == McpToolModel.server_id)
-                    .where(
-                        McpServerModel.deleted_at.is_(None),
-                        McpServerModel.enabled.is_(True),
-                        readable_clause,
-                    )
-                )
-                or 0
-            )
-            if total == 0:
-                return ToolPage(items=(), total=0)
-            rows = list(
-                (
-                    await session.scalars(
-                        select(McpToolModel)
-                        .join(McpServerModel, McpServerModel.id == McpToolModel.server_id)
-                        .where(
-                            McpServerModel.deleted_at.is_(None),
-                            McpServerModel.enabled.is_(True),
-                            readable_clause,
-                        )
-                        .order_by(McpToolModel.model_name)
-                        .offset(offset)
-                        .limit(limit)
-                    )
-                ).all()
+            rows, total = await self._query_tool_page(
+                session,
+                offset=offset,
+                limit=limit,
+                extra_clauses=(
+                    McpServerModel.enabled.is_(True),
+                    self._readable_server_clause(resolved),
+                ),
             )
         return ToolPage(items=tuple(tool_to_public(row) for row in rows), total=total)
 
@@ -772,30 +653,28 @@ class SqlAlchemyMcpRepository(McpServerRepository, McpToolRuntimeReader):
 
     async def get_public_tool(self, tool_id: str) -> PublicToolDefinition | None:
         """按工具 ID 返回未软删且已启用 Server 的公共工具投影。"""
-        async with self._session_factory() as session:
-            row = await session.scalar(
-                select(McpToolModel)
-                .join(McpServerModel, McpServerModel.id == McpToolModel.server_id)
-                .where(
-                    McpToolModel.id == tool_id,
-                    McpServerModel.deleted_at.is_(None),
-                    McpServerModel.enabled.is_(True),
-                )
-            )
+        row = await self._get_tool(tool_id, enabled_only=True)
         return None if row is None else tool_to_public(row)
 
     async def get_admin_tool(self, tool_id: str) -> AdminToolDefinition | None:
         """按工具 ID 返回未软删 Server 的管理员工具投影。"""
+        row = await self._get_tool(tool_id, enabled_only=False)
+        return None if row is None else tool_to_admin(row)
+
+    async def _get_tool(self, tool_id: str, *, enabled_only: bool) -> McpToolModel | None:
+        """按工具 ID 读取未软删（可选仅已启用）Server 下的工具 ORM 行。"""
+        conditions: list[ColumnElement[bool]] = [
+            McpToolModel.id == tool_id,
+            McpServerModel.deleted_at.is_(None),
+        ]
+        if enabled_only:
+            conditions.append(McpServerModel.enabled.is_(True))
         async with self._session_factory() as session:
-            row = await session.scalar(
+            return await session.scalar(
                 select(McpToolModel)
                 .join(McpServerModel, McpServerModel.id == McpToolModel.server_id)
-                .where(
-                    McpToolModel.id == tool_id,
-                    McpServerModel.deleted_at.is_(None),
-                )
+                .where(*conditions)
             )
-        return None if row is None else tool_to_admin(row)
 
     async def _tool_page(
         self,
@@ -806,30 +685,131 @@ class SqlAlchemyMcpRepository(McpServerRepository, McpToolRuntimeReader):
     ) -> tuple[list[McpToolModel], int]:
         if offset < 0 or not 1 <= limit <= 100:
             raise ValueError("mcp_page_invalid")
+        extra_clauses: tuple[ColumnElement[bool], ...] = (
+            (McpToolModel.server_id == server_id,) if server_id is not None else ()
+        )
         async with self._session_factory() as session:
-            count_query = (
+            return await self._query_tool_page(
+                session,
+                offset=offset,
+                limit=limit,
+                extra_clauses=extra_clauses,
+            )
+
+    @staticmethod
+    async def _query_tool_page(
+        session: AsyncSession,
+        *,
+        offset: int,
+        limit: int,
+        extra_clauses: Sequence[ColumnElement[bool]],
+    ) -> tuple[list[McpToolModel], int]:
+        """复用未软删 Server 联表条件执行工具总数统计与按 model_name 分页查询。"""
+        base_clauses = (McpServerModel.deleted_at.is_(None), *extra_clauses)
+        total = int(
+            await session.scalar(
                 select(func.count())
                 .select_from(McpToolModel)
                 .join(McpServerModel, McpServerModel.id == McpToolModel.server_id)
-                .where(McpServerModel.deleted_at.is_(None))
+                .where(*base_clauses)
             )
-            rows_query = (
-                select(McpToolModel)
-                .join(McpServerModel, McpServerModel.id == McpToolModel.server_id)
-                .where(McpServerModel.deleted_at.is_(None))
-            )
-            if server_id is not None:
-                count_query = count_query.where(McpToolModel.server_id == server_id)
-                rows_query = rows_query.where(McpToolModel.server_id == server_id)
-            total = int(await session.scalar(count_query) or 0)
-            rows = list(
-                (
-                    await session.scalars(
-                        rows_query.order_by(McpToolModel.model_name).offset(offset).limit(limit)
-                    )
-                ).all()
-            )
+            or 0
+        )
+        if total == 0:
+            return [], 0
+        rows = list(
+            (
+                await session.scalars(
+                    select(McpToolModel)
+                    .join(McpServerModel, McpServerModel.id == McpToolModel.server_id)
+                    .where(*base_clauses)
+                    .order_by(McpToolModel.model_name)
+                    .offset(offset)
+                    .limit(limit)
+                )
+            ).all()
+        )
         return rows, total
+
+    @staticmethod
+    async def _get_active_server(
+        session: AsyncSession,
+        server_id: str,
+    ) -> McpServerModel | None:
+        """按主键读取未软删 Server 行。"""
+        return await session.scalar(
+            select(McpServerModel).where(
+                McpServerModel.id == server_id,
+                McpServerModel.deleted_at.is_(None),
+            )
+        )
+
+    @staticmethod
+    async def _lock_active_server(
+        session: AsyncSession,
+        server_id: str,
+        *,
+        expected_config_version: int | None = None,
+        populate_existing: bool = True,
+    ) -> McpServerModel:
+        """以 FOR UPDATE 锁定未软删 Server 并按需校验 CAS config_version。"""
+        query = (
+            select(McpServerModel)
+            .where(
+                McpServerModel.id == server_id,
+                McpServerModel.deleted_at.is_(None),
+            )
+            .with_for_update()
+        )
+        if populate_existing:
+            query = query.execution_options(populate_existing=True)
+        row = await session.scalar(query)
+        if row is None:
+            raise McpServerNotFoundError("mcp_server_not_found")
+        if expected_config_version is not None and row.config_version != expected_config_version:
+            raise McpConfigVersionConflictError("mcp_config_version_conflict")
+        return row
+
+    @staticmethod
+    async def _sync_server_grants(
+        session: AsyncSession,
+        server_id: str,
+        visibility_scope: VisibilityScope,
+        visibility_grants: Sequence[VisibilityGrantInput],
+        *,
+        now: datetime,
+    ) -> tuple[VisibilityGrant, ...]:
+        """按可见范围同步 Server 授权：仅 department 范围保留显式授权列表。"""
+        return await sync_resource_grants_in_session(
+            session,
+            ResourceType.MCP_SERVER,
+            server_id,
+            visibility_grants if visibility_scope is VisibilityScope.DEPARTMENT else (),
+            now=now,
+        )
+
+    @staticmethod
+    async def _load_server_grants(
+        session: AsyncSession,
+        server_id: str,
+    ) -> tuple[VisibilityGrant, ...]:
+        """在当前数据库会话中加载单个 MCP Server 的可见性授权。"""
+        grants_map = await load_grants_map_in_session(
+            session, ResourceType.MCP_SERVER, (server_id,)
+        )
+        return grants_map.get(server_id, ())
+
+    @staticmethod
+    def _readable_server_clause(snapshot: UserAccessSnapshot) -> ColumnElement[bool]:
+        """构造 MCP Server 三层权限 SQL 下推过滤条件。"""
+        return build_readable_resource_clause(
+            snapshot,
+            ResourceType.MCP_SERVER,
+            id_col=McpServerModel.id,
+            scope_col=McpServerModel.visibility_scope,
+            owner_id_col=None,
+            owner_department_id_col=McpServerModel.owner_department_id,
+        )
 
     async def _align_server_tools_in_session(
         self,
@@ -933,31 +913,40 @@ class SqlAlchemyMcpRepository(McpServerRepository, McpToolRuntimeReader):
             remote_names.add(tool.remote_name)
 
     @staticmethod
+    def _new_tool_model(
+        server_id: str,
+        tool: ToolDefinition,
+        created_at: datetime,
+    ) -> McpToolModel:
+        """构造新增 MCP 工具 ORM 行。"""
+        return McpToolModel(
+            id=tool.tool_id,
+            server_id=server_id,
+            remote_name=tool.remote_name,
+            model_name=tool.model_name,
+            description=tool.description,
+            input_schema_json=dict(tool.input_schema),
+            requires_approval=tool.requires_approval,
+            display_name=None,
+            approval_summary_template=None,
+            parameter_labels_json={},
+            created_at=created_at,
+        )
+
+    @classmethod
     def _insert_tools(
+        cls,
         session: AsyncSession,
         server_id: str,
         tools: Sequence[ToolDefinition],
         created_at: datetime,
     ) -> None:
         for tool in tools:
-            session.add(
-                McpToolModel(
-                    id=tool.tool_id,
-                    server_id=server_id,
-                    remote_name=tool.remote_name,
-                    model_name=tool.model_name,
-                    description=tool.description,
-                    input_schema_json=dict(tool.input_schema),
-                    requires_approval=tool.requires_approval,
-                    display_name=None,
-                    approval_summary_template=None,
-                    parameter_labels_json={},
-                    created_at=created_at,
-                )
-            )
+            session.add(cls._new_tool_model(server_id, tool, created_at))
 
-    @staticmethod
+    @classmethod
     def _replace_tools(
+        cls,
         session: AsyncSession,
         server_id: str,
         tools: Sequence[ToolDefinition],
@@ -968,21 +957,7 @@ class SqlAlchemyMcpRepository(McpServerRepository, McpToolRuntimeReader):
         for tool in tools:
             existing = existing_by_remote.get(tool.remote_name)
             if existing is None:
-                session.add(
-                    McpToolModel(
-                        id=tool.tool_id,
-                        server_id=server_id,
-                        remote_name=tool.remote_name,
-                        model_name=tool.model_name,
-                        description=tool.description,
-                        input_schema_json=dict(tool.input_schema),
-                        requires_approval=tool.requires_approval,
-                        display_name=None,
-                        approval_summary_template=None,
-                        parameter_labels_json={},
-                        created_at=updated_at,
-                    )
-                )
+                session.add(cls._new_tool_model(server_id, tool, updated_at))
             else:
                 existing.description = tool.description
                 existing.input_schema_json = dict(tool.input_schema)

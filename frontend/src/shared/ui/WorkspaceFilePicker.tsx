@@ -55,7 +55,7 @@ export function WorkspaceFilePicker({
         aria-describedby={describedBy}
         aria-invalid={invalid || undefined}
         aria-label={label}
-        className="sr-only workspace-file-picker-input"
+        className="sr-only"
         data-autofocus={focusOnOpen ? true : undefined}
         disabled={disabled}
         id={id}
@@ -68,15 +68,15 @@ export function WorkspaceFilePicker({
       />
       <div
         className={cn(
-          "workspace-file-picker flex min-h-[38px] w-full min-w-0 items-center gap-[9px] rounded-lg border border-border-default py-[3px] pr-2 pl-1 transition-colors hover:border-border-strong focus-within:border-ring-focus focus-within:ring-2 focus-within:ring-ring-focus/20 data-[invalid=true]:border-danger data-[invalid=true]:bg-danger-bg",
-          disabled ? "is-disabled bg-muted opacity-70" : "bg-canvas",
+          "flex min-h-[38px] w-full min-w-0 items-center gap-[9px] rounded-lg border border-border-default py-[3px] pr-2 pl-1 transition-colors hover:border-border-strong focus-within:border-ring-focus focus-within:ring-2 focus-within:ring-ring-focus/20 data-[invalid=true]:border-danger data-[invalid=true]:bg-danger-bg",
+          disabled ? "bg-muted opacity-70" : "bg-canvas",
         )}
         data-invalid={invalid ? "true" : undefined}
       >
         {buttonTrigger ? (
           // 外部已有显式 <label htmlFor={id}> 时使用按钮触发器，避免重复 Tab 停留在隐藏 input 上。
           <button
-            className="workspace-file-picker-trigger inline-flex min-h-[30px] shrink-0 items-center gap-1.5 rounded-md border border-brand-border bg-brand-subtle px-2.5 text-xs font-semibold whitespace-nowrap text-brand transition-colors hover:enabled:bg-active disabled:cursor-not-allowed disabled:opacity-60"
+            className="inline-flex min-h-[30px] shrink-0 items-center gap-1.5 rounded-md border border-brand-border bg-brand-subtle px-2.5 text-xs font-semibold whitespace-nowrap text-brand transition-colors hover:enabled:bg-active disabled:cursor-not-allowed disabled:opacity-60"
             disabled={disabled}
             onClick={() => resolvedInputRef.current?.click()}
             type="button"
@@ -87,7 +87,7 @@ export function WorkspaceFilePicker({
         ) : (
           <label
             aria-disabled={disabled || undefined}
-            className="workspace-file-picker-trigger inline-flex min-h-[30px] shrink-0 cursor-pointer items-center gap-1.5 rounded-md border border-brand-border bg-brand-subtle px-2.5 text-xs font-semibold whitespace-nowrap text-brand transition-colors hover:bg-active aria-disabled:cursor-not-allowed aria-disabled:opacity-60"
+            className="inline-flex min-h-[30px] shrink-0 cursor-pointer items-center gap-1.5 rounded-md border border-brand-border bg-brand-subtle px-2.5 text-xs font-semibold whitespace-nowrap text-brand transition-colors hover:bg-active aria-disabled:cursor-not-allowed aria-disabled:opacity-60"
             htmlFor={id}
           >
             <Icon name="upload" size={14} />
@@ -98,8 +98,8 @@ export function WorkspaceFilePicker({
           aria-live="polite"
           className={
             file
-              ? "workspace-file-picker-name min-w-0 flex-1 truncate text-xs font-medium text-text-primary"
-              : "workspace-file-picker-placeholder min-w-0 flex-1 truncate text-xs text-text-tertiary"
+              ? "min-w-0 flex-1 truncate text-xs font-medium text-text-primary"
+              : "min-w-0 flex-1 truncate text-xs text-text-tertiary"
           }
           title={file?.name}
         >
@@ -110,7 +110,7 @@ export function WorkspaceFilePicker({
         {file ? (
           <button
             aria-label="清除已选文件"
-            className="workspace-file-picker-clear inline-grid h-[26px] w-[26px] shrink-0 place-items-center rounded-md bg-transparent p-0 text-text-tertiary transition-colors hover:enabled:bg-muted hover:enabled:text-text-primary disabled:opacity-50"
+            className="inline-grid h-[26px] w-[26px] shrink-0 place-items-center rounded-md bg-transparent p-0 text-text-tertiary transition-colors hover:enabled:bg-muted hover:enabled:text-text-primary disabled:opacity-50"
             disabled={disabled}
             onClick={clearFile}
             type="button"

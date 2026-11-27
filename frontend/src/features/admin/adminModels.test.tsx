@@ -477,7 +477,7 @@ describe("管理模型页", () => {
 
     const primaryCard = screen
       .getAllByRole("heading", { name: PRIMARY.name })
-      .find((heading) => heading.closest("li.admin-model-card"))
+      .find((heading) => heading.closest("li"))
       ?.closest("li");
     expect(primaryCard).not.toBeNull();
     await user.click(

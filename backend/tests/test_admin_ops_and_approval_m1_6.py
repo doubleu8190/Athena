@@ -14,6 +14,7 @@ import pytest
 from alembic import command
 from alembic.config import Config
 from alembic.script import ScriptDirectory
+from auth_support import FakePasswordHasher
 from fastapi.testclient import TestClient
 from pg_unit_harness import create_pg_unit_db
 from sqlalchemy import DateTime, func, literal, select
@@ -88,18 +89,6 @@ SECRET_KEY = b"7" * 32
 def _run[T](coroutine: Coroutine[Any, Any, T]) -> T:
     """在同步测试函数中运行异步协程。"""
     return asyncio.run(coroutine)
-
-
-class _FakePasswordHasher:
-    """确定性快速密码校验器，用于建立真实 Cookie 登录态。"""
-
-    dummy_hash = "fake:dummy"
-
-    def hash_password(self, password: str) -> str:
-        return f"fake:{password}"
-
-    def verify_password(self, password: str, password_hash: str) -> bool:
-        return password_hash == f"fake:{password}"
 
 
 class _MutableClock:
@@ -209,7 +198,7 @@ async def _create_harness(
     auth_repo = SqlAlchemyAuthRepository(session_factory)
     auth_service = AuthService(
         auth_repo,
-        _FakePasswordHasher(),
+        FakePasswordHasher(),
         clock=clock,
     )
     access_repo = SqlAlchemyAccessControlRepository(session_factory)

@@ -2,13 +2,9 @@ import React from "react";
 import ReactDOM from "react-dom/client";
 
 import { App } from "./app/App";
-// 按 Cascade 层级顺序引入 Design Tokens、全局样式、最小兼容层与未迁移模块样式表。
+// 按 Cascade 层级顺序引入 Design Tokens 与全局基础排版样式；全站业务模块均已统一使用 Tailwind v4。
 import "./shared/styles/tokens.css";
 import "./shared/styles/global.css";
-import "./shared/styles/legacy-compat.css";
-import "./features/knowledge/knowledge.css";
-import "./features/admin/admin.css";
-import "./features/skills/personalSkills.css";
 
 const root = document.getElementById("root");
 

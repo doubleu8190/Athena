@@ -46,7 +46,7 @@ from domain.auth import (
     UserRole,
     UserStatus,
 )
-from domain.org import OrgMembershipReader, OrgUserDetail, UserOrgMembership
+from domain.org import OrgRepository, OrgUserDetail, UserOrgMembership
 from infrastructure.feishu import FeishuError, FeishuUserIdentity
 
 logger = logging.getLogger(__name__)
@@ -181,7 +181,7 @@ class AuthService:
         repository: AuthRepository,
         password_hasher: PasswordHasher,
         *,
-        org_reader: OrgMembershipReader | None = None,
+        org_reader: OrgRepository | None = None,
         feishu_client: FeishuSsoClient | None = None,
         oauth_state_store: OAuthStateStore | None = None,
         mock_enabled: bool = False,

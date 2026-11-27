@@ -1,6 +1,7 @@
 import { useState } from "react";
 
 import { saveDownloadedBlob } from "../knowledge/KnowledgeSourceButton";
+import { buttonVariants, TEXT_BUTTON_CLASS } from "../../shared/ui";
 import { Icon } from "../../shared/ui/Icons";
 import { downloadSessionFile } from "./api";
 import { fileErrorMessage } from "./errorMessages";
@@ -43,7 +44,11 @@ export function SessionFileDownloadButton({
     <span className="inline-flex min-w-0 flex-col items-end gap-[3px]">
       <button
         aria-label={`下载文件：${filename}`}
-        className={compact ? "text-button" : "button-quiet"}
+        className={
+          compact
+            ? TEXT_BUTTON_CLASS
+            : buttonVariants({ size: "sm", variant: "outline" })
+        }
         disabled={pending}
         onClick={() => void handleDownload()}
         type="button"

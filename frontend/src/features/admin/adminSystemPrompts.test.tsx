@@ -705,13 +705,7 @@ describe("管理员系统提示词页", () => {
       await screen.findByText(/服务端当前版本已在编辑期间变化/),
     ).toBeInTheDocument();
 
-    expect(
-      screen.getByText(
-        (_content, element) =>
-          element?.classList.contains("admin-status-badge") === true &&
-          element.textContent.includes("编辑基线 main-v1"),
-      ),
-    ).toBeInTheDocument();
+    expect(screen.getByText("编辑基线 main-v1")).toBeInTheDocument();
     expect(screen.getByText("管理员 A")).toBeInTheDocument();
     expect(
       screen.getByText(formatDateTime(baseline.created_at)),

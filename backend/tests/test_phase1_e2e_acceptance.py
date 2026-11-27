@@ -28,6 +28,7 @@ import pytest
 from alembic import command
 from alembic.config import Config
 from alembic.script import ScriptDirectory
+from auth_support import FakePasswordHasher
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from pg_unit_harness import create_pg_unit_db
@@ -138,18 +139,6 @@ class _MutableClock:
     def advance(self, seconds: int = 5) -> datetime:
         self.current = self.current + timedelta(seconds=seconds)
         return self.current
-
-
-class _FakePasswordHasher:
-    """确定性快速密码校验器，用于构建真实 HttpOnly Cookie 会话。"""
-
-    dummy_hash = "fake:dummy"
-
-    def hash_password(self, password: str) -> str:
-        return f"fake:{password}"
-
-    def verify_password(self, password: str, password_hash: str) -> bool:
-        return password_hash != self.dummy_hash and password_hash == f"fake:{password}"
 
 
 class _SimpleTokenizer:
@@ -617,7 +606,7 @@ async def _create_harness(
     )
     auth_service = AuthService(
         auth_repo,
-        _FakePasswordHasher(),
+        FakePasswordHasher(),
         org_reader=org_repo,
         feishu_client=feishu_client,
         oauth_state_store=oauth_state_store,

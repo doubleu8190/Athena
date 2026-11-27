@@ -17,6 +17,7 @@ import pytest
 from alembic import command
 from alembic.config import Config
 from alembic.script import ScriptDirectory
+from auth_support import FakePasswordHasher
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from pg_unit_harness import create_pg_unit_db
@@ -70,18 +71,6 @@ from domain.skill import (
 REPO_ROOT = Path(__file__).resolve().parents[2]
 ALEMBIC_INI = REPO_ROOT / "backend" / "alembic.ini"
 NOW = datetime(2026, 11, 24, 5, 30, tzinfo=UTC)
-
-
-class _FakePasswordHasher:
-    """测试专用轻量密码校验器，避免 Argon2 耗时。"""
-
-    dummy_hash = "hash:dummy"
-
-    def hash_password(self, password: str) -> str:
-        return f"hash:{password}"
-
-    def verify_password(self, password: str, password_hash: str) -> bool:
-        return password_hash == f"hash:{password}"
 
 
 class _MemoryFileObjectStore:
@@ -211,7 +200,7 @@ class _M33Harness:
         self.org_repo = SqlAlchemyOrgRepository(self.session_factory)
         self.auth_service = AuthService(
             self.auth_repo,
-            _FakePasswordHasher(),
+            FakePasswordHasher(),
             org_reader=self.org_repo,
             clock=self.clock,
         )
@@ -312,7 +301,7 @@ class _M33Harness:
                     UserModel(
                         id=user_id,
                         email=email,
-                        password_hash="hash:secret123",
+                        password_hash=FakePasswordHasher().hash_password("secret123"),
                         display_name=display_name,
                         status=UserStatus.ACTIVE.value,
                         role=role.value,

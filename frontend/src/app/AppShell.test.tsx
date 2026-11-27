@@ -763,6 +763,27 @@ describe("单层可折叠主应用壳层（AppShell）", () => {
     ).not.toBeInTheDocument();
     expect(screen.getAllByLabelText("Athena 对话首页")).toHaveLength(1);
 
+    // 验证窄屏顶栏左侧汉堡按钮与唯一 Brand 属于同一左对齐容器，与右侧新建对话按钮分列顶栏两侧。
+    const menuButton = screen.getByRole("button", {
+      name: "打开导航菜单",
+    });
+    const header = menuButton.closest("header");
+    expect(header).not.toBeNull();
+    if (!header) {
+      throw new Error("Expected mobile top header element");
+    }
+    const brandLink = within(header).getByRole("link", {
+      name: "Athena 对话首页",
+    });
+    const newChatLink = within(header).getByRole("link", {
+      name: "新建对话",
+    });
+    const leftGroup = menuButton.parentElement;
+    expect(leftGroup).not.toBeNull();
+    expect(leftGroup).toBe(brandLink.parentElement);
+    expect(leftGroup).not.toBe(header);
+    expect(Array.from(header.children)).toEqual([leftGroup, newChatLink]);
+
     // 点击汉堡打开 Sheet 抽屉，点击「技能库」导航后自动关闭抽屉。
     await user.click(screen.getByRole("button", { name: "打开导航菜单" }));
     const drawer = screen.getByRole("dialog", { name: "工作区导航" });

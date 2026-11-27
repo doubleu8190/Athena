@@ -501,32 +501,34 @@ function AppShellLayout() {
       ) : null}
 
       <div className="flex min-w-0 flex-1 flex-col overflow-hidden bg-canvas">
-        {/* <1024px 窄屏顶栏：左侧汉堡触发左侧 Sheet 抽屉，中间唯一 Brand，右侧快捷新建对话。 */}
+        {/* <1024px 窄屏顶栏：左侧汉堡按钮与唯一 Brand 左对齐分组，右侧快捷新建对话。 */}
         {!isDesktop ? (
-          <header className="flex h-12 shrink-0 items-center justify-between border-b border-border-subtle bg-canvas px-3">
-            <button
-              aria-controls="mobile-navigation-drawer"
-              aria-expanded={mobileDrawerOpen}
-              aria-label="打开导航菜单"
-              className="inline-flex h-9 w-9 items-center justify-center rounded-lg text-text-secondary transition-colors hover:bg-subtle hover:text-text-primary focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring-focus"
-              data-icon-button="true"
-              onClick={() => setMobileDrawerOpen(true)}
-              type="button"
-            >
-              <Menu aria-hidden="true" className="h-5 w-5" />
-            </button>
+          <header className="flex h-12 shrink-0 items-center justify-between gap-2 border-b border-border-subtle bg-canvas px-3">
+            <div className="flex min-w-0 items-center gap-2">
+              <button
+                aria-controls="mobile-navigation-drawer"
+                aria-expanded={mobileDrawerOpen}
+                aria-label="打开导航菜单"
+                className="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-lg text-text-secondary transition-colors hover:bg-subtle hover:text-text-primary focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring-focus"
+                data-icon-button="true"
+                onClick={() => setMobileDrawerOpen(true)}
+                type="button"
+              >
+                <Menu aria-hidden="true" className="h-5 w-5" />
+              </button>
 
-            <Link
-              aria-label="Athena 对话首页"
-              className="rounded-lg focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring-focus"
-              to="/chat"
-            >
-              <Brand compact />
-            </Link>
+              <Link
+                aria-label="Athena 对话首页"
+                className="min-w-0 rounded-lg focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring-focus"
+                to="/chat"
+              >
+                <Brand compact />
+              </Link>
+            </div>
 
             <Link
               aria-label="新建对话"
-              className="inline-flex h-9 w-9 items-center justify-center rounded-lg text-brand transition-colors hover:bg-brand-subtle focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring-focus"
+              className="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-lg text-brand transition-colors hover:bg-brand-subtle focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring-focus"
               data-icon-button="true"
               replace={false}
               to={newChatTarget}

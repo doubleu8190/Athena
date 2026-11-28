@@ -6,6 +6,7 @@ import asyncio
 import logging
 import math
 import multiprocessing
+import re
 import threading
 import time
 import weakref
@@ -45,6 +46,11 @@ ORPHAN_REFERENCE_BATCH_SIZE = 100
 DEFAULT_ORPHAN_SWEEP_INTERVAL_SECONDS = 3600.0
 LEASE_SECONDS = 120
 HEARTBEAT_SECONDS = 20
+
+_SENTENCE_END_PUNCTUATION = frozenset({"。", "！", "？", "；", ".", "!", "?", ";"})
+_CLAUSE_AND_SPACE_SEPARATORS = frozenset({"，", ",", " ", "\t"})
+_IGNORED_CONTEXT_HEADINGS = frozenset({"normal", "body text", "default paragraph font", "正文"})
+_TABLE_PLACEHOLDER_HEADING_RE = re.compile(r"^table \d+$", re.IGNORECASE)
 
 logger = logging.getLogger(__name__)
 
@@ -153,6 +159,11 @@ class KnowledgeWorker:
                 raise ValueError("document_text_empty")
             if lost_lease.is_set():
                 return True
+            # 为向量化与全文检索构造带文档/章节/表定位头的索引文本；
+            # 入库正文与 token_count 仍保留干净原文。
+            index_texts = [
+                _build_index_text(content, locator, job.title) for content, locator, _ in chunks
+            ]
             # 按嵌入客户端配置动态决定单轮向量化窗口大小（如 batch_size * 4），
             # 既让远程客户端 4 路并发充分生效，又在窗口间定期复核租约状态及时中止失租任务。
             embed_window_size = _resolve_embed_window_size(self._embedding)
@@ -160,7 +171,7 @@ class KnowledgeWorker:
             for start in range(0, len(chunks), embed_window_size):
                 if lost_lease.is_set():
                     return True
-                batch_texts = [chunk[0] for chunk in chunks[start : start + embed_window_size]]
+                batch_texts = index_texts[start : start + embed_window_size]
                 batch_vectors = await self._embedding.embed(batch_texts)
                 if len(batch_vectors) != len(batch_texts) or any(
                     not _is_valid_embedding_vector(vector) for vector in batch_vectors
@@ -173,6 +184,7 @@ class KnowledgeWorker:
             ready_chunks = await asyncio.to_thread(
                 _build_ready_chunks,
                 chunks,
+                index_texts,
                 vectors,
                 self._tokenizer,
             )
@@ -248,6 +260,7 @@ class KnowledgeWorker:
         return list(parsed.blocks), list(parsed.warnings)
 
     async def _heartbeat(self, job: ClaimedKnowledgeJob, lost_lease: asyncio.Event) -> None:
+        # 每 20 秒续租一次，一旦失租即置位 lost_lease 中止后续步骤
         while True:
             await asyncio.sleep(HEARTBEAT_SECONDS)
             renewed = await self._repository.heartbeat_job(
@@ -285,22 +298,71 @@ def _is_valid_embedding_vector(vector: list[float]) -> bool:
     )
 
 
+def _build_index_text(content: str, locator: dict[str, object], title: str) -> str:
+    """按规则拼装上下文检索头，仅用于向量化与分词索引，不污染原始展示正文。"""
+    parts: list[str] = []
+    clean_title = title.strip()
+    if clean_title:
+        parts.append(f"文档: {clean_title}")
+
+    heading = locator.get("heading")
+    if isinstance(heading, str):
+        clean_heading = heading.strip()
+        if (
+            clean_heading
+            and clean_heading.casefold() not in _IGNORED_CONTEXT_HEADINGS
+            and _TABLE_PLACEHOLDER_HEADING_RE.match(clean_heading) is None
+        ):
+            parts.append(f"章节: {clean_heading}")
+
+    sheet = locator.get("sheet")
+    if isinstance(sheet, str) and sheet.strip():
+        parts.append(f"工作表: {sheet.strip()}")
+
+    slide = locator.get("slide")
+    if slide is not None and not isinstance(slide, bool):
+        slide_text = str(slide).strip()
+        if slide_text:
+            parts.append(f"第{slide_text}页")
+
+    if not parts:
+        return content
+    return f"[{' | '.join(parts)}]\n{content}"
+
+
 def _build_ready_chunks(
     chunks: list[tuple[str, dict[str, object], int]],
+    index_texts: list[str],
     vectors: list[list[float]],
     tokenizer: ChineseTokenizer,
 ) -> list[tuple[str, dict[str, object], int, str, list[float]]]:
-    """在工作线程中为切片批量生成中文分词文本并组装发布负载。"""
+    """在工作线程中为增强索引文本生成中文分词，并与干净原文组装发布负载。"""
     return [
-        (content, locator, count, " ".join(tokenizer.tokenize(content)), vector)
-        for (content, locator, count), vector in zip(chunks, vectors, strict=True)
+        (content, locator, count, " ".join(tokenizer.tokenize(index_text)), vector)
+        for (content, locator, count), index_text, vector in zip(
+            chunks, index_texts, vectors, strict=True
+        )
     ]
+
+
+def _table_group_key(block: TextBlock) -> tuple[str, str, str | None] | None:
+    """返回参与按表聚合与拆片重复表头的表格分组键；无明确表标识时返回 None。"""
+    locator = block.locator
+    if locator.kind == "xlsx" and locator.sheet is not None:
+        return ("xlsx", locator.sheet, None)
+    if block.kind != "table":
+        return None
+    if locator.kind == "docx_table" and locator.heading:
+        return ("docx_table", locator.heading, None)
+    if locator.kind == "pptx_table" and locator.slide is not None and locator.shape is not None:
+        return ("pptx_table", str(locator.slide), locator.shape)
+    return None
 
 
 def _merge_region_key(
     block: TextBlock,
 ) -> tuple[str, int | None, str | None, int | None, str | None, str | None] | None:
-    """返回可合并短文本块的区域键；表格等非文本块不参与跨块合并。"""
+    """返回可合并短文本块的区域键；代码块与表格块不参与普通文本合并。"""
     if block.kind != "text":
         return None
     locator = block.locator
@@ -344,22 +406,71 @@ def _merge_locators(first: ChunkLocator, last: ChunkLocator) -> ChunkLocator:
     )
 
 
+def _find_natural_split_end(text: str, pos: int, max_end: int) -> int:
+    """在最大右端点末尾约 20% 窗口内按段落/换行/句末标点/子句空白寻找自然切分边界。"""
+    window = max(1, (max_end - pos) // 5)
+    min_end = max(pos + 1, max_end - window)
+
+    # 1. 优先在空行（段落边界）后切分。
+    para_idx = text.rfind("\n\n", min_end, max_end)
+    if para_idx != -1:
+        return para_idx + 2
+
+    # 2. 次优在单个换行符后切分。
+    line_idx = text.rfind("\n", min_end, max_end)
+    if line_idx != -1:
+        return line_idx + 1
+
+    # 3. 再次优在句末标点后切分；跳过数字间小数点/版本号点（如 3.14、v2.1）。
+    text_len = len(text)
+    for idx in range(max_end - 1, min_end - 1, -1):
+        ch = text[idx]
+        if ch not in _SENTENCE_END_PUNCTUATION:
+            continue
+        if (
+            ch == "."
+            and idx > 0
+            and idx + 1 < text_len
+            and text[idx - 1].isdigit()
+            and text[idx + 1].isdigit()
+        ):
+            continue
+        return idx + 1
+
+    # 4. 兜底在子句标点或空白字符后切分，避免截断英文单词。
+    for idx in range(max_end - 1, min_end - 1, -1):
+        if text[idx] in _CLAUSE_AND_SPACE_SEPARATORS:
+            return idx + 1
+
+    return max_end
+
+
 def _split_long_text_with_cursor(
     text: str,
     locator: ChunkLocator,
     counter: TokenCounterPort,
     output: list[tuple[str, dict[str, object], int]],
+    *,
+    prefix: str = "",
 ) -> None:
-    """按 Python 字符下标执行严格 O(N) 游标分块（倍增探测 + 局部二分），天然不切碎 UTF-8。"""
+    """按 Python 字符下标执行严格 O(N) 游标分块（倍增探测 + 自然边界回退），天然不切碎 UTF-8。"""
     total = len(text)
     pos = 0
+    # 带固定前缀（如表格重复表头）切分时，限制重叠预算不超过可用正文空间的 1/4，确保稳步前移。
+    overlap_budget = (
+        min(CHUNK_TOKEN_OVERLAP, max(1, (CHUNK_TOKEN_LIMIT - counter.count(prefix)) // 4))
+        if prefix
+        else CHUNK_TOKEN_OVERLAP
+    )
     while pos < total:
-        split_end = _largest_prefix_from(text, pos, counter, CHUNK_TOKEN_LIMIT)
-        if split_end >= total:
+        max_end = _largest_prefix_from(text, pos, counter, CHUNK_TOKEN_LIMIT, prefix=prefix)
+        if max_end >= total:
             piece = text[pos:].rstrip()
             if piece:
-                output.append((piece, asdict(locator), counter.count(piece)))
+                chunk_text = f"{prefix}{piece}" if prefix else piece
+                output.append((chunk_text, asdict(locator), counter.count(chunk_text)))
             break
+        split_end = _find_natural_split_end(text, pos, max_end)
         piece = text[pos:split_end].rstrip()
         if not piece:
             # 窗口内全为空白时直接跳过并单调前移游标，杜绝死循环。
@@ -367,9 +478,25 @@ def _split_long_text_with_cursor(
             while pos < total and text[pos].isspace():
                 pos += 1
             continue
-        output.append((piece, asdict(locator), counter.count(piece)))
-        overlap_offset = _largest_suffix_start(piece, counter, CHUNK_TOKEN_OVERLAP)
+        chunk_text = f"{prefix}{piece}" if prefix else piece
+        output.append((chunk_text, asdict(locator), counter.count(chunk_text)))
+        overlap_offset = _largest_suffix_start(piece, counter, overlap_budget)
         next_pos = pos + overlap_offset
+        if (
+            pos < next_pos < split_end
+            and text[next_pos - 1].isascii()
+            and text[next_pos - 1].isalnum()
+            and text[next_pos].isascii()
+            and text[next_pos].isalnum()
+        ):
+            # overlap 落在英文单词或数字中间时，向后跳过当前词残片到最近空白/换行。
+            adjusted = next_pos
+            while adjusted < split_end and not text[adjusted].isspace():
+                adjusted += 1
+            while adjusted < split_end and text[adjusted].isspace():
+                adjusted += 1
+            if adjusted < split_end:
+                next_pos = adjusted
         while next_pos < split_end and text[next_pos].isspace():
             next_pos += 1
         if next_pos <= pos:
@@ -383,7 +510,7 @@ def _make_chunks(
     blocks: list[TextBlock],
     counter: TokenCounterPort,
 ) -> list[tuple[str, dict[str, object], int]]:
-    """合并相邻同区域短文本块并按 tokenizer 限制切分长文本，保留来源定位与重叠上下文。"""
+    """合并相邻同区域短文本块与同表行（拆片自动重复表头），隔离代码块并按自然边界切分长文本。"""
     output: list[tuple[str, dict[str, object], int]] = []
     buffer_text = ""
     buffer_tokens = 0
@@ -393,10 +520,14 @@ def _make_chunks(
     buffer_region: tuple[str, int | None, str | None, int | None, str | None, str | None] | None = (
         None
     )
+    buffer_table_key: tuple[str, str, str | None] | None = None
+    current_table_key: tuple[str, str, str | None] | None = None
+    current_table_header: str | None = None
+    current_table_header_tokens = 0
 
     def flush_buffer() -> None:
         nonlocal buffer_text, buffer_tokens, buffer_count
-        nonlocal buffer_first_locator, buffer_last_locator, buffer_region
+        nonlocal buffer_first_locator, buffer_last_locator, buffer_region, buffer_table_key
         if not buffer_text or buffer_first_locator is None or buffer_last_locator is None:
             return
         locator = (
@@ -411,13 +542,98 @@ def _make_chunks(
         buffer_first_locator = None
         buffer_last_locator = None
         buffer_region = None
+        buffer_table_key = None
+
+    def reset_table_state() -> None:
+        nonlocal current_table_key, current_table_header, current_table_header_tokens
+        current_table_key = None
+        current_table_header = None
+        current_table_header_tokens = 0
+
+    def start_table_buffer(
+        pending: str,
+        pending_tokens: int,
+        locator: ChunkLocator,
+        table_key: tuple[str, str, str | None],
+        *,
+        prepend_header: bool,
+    ) -> None:
+        nonlocal buffer_text, buffer_tokens, buffer_count
+        nonlocal buffer_first_locator, buffer_last_locator, buffer_region, buffer_table_key
+        # 表格拆片开启新分片时，若表头不超过单块预算一半，始终携带表头：
+        # 拼接后不超上限则入缓冲继续合并后续短行；超上限则以表头为前缀切分当前长行。
+        if (
+            prepend_header
+            and current_table_header is not None
+            and current_table_header_tokens <= CHUNK_TOKEN_LIMIT // 2
+        ):
+            with_header = f"{current_table_header}\n{pending}"
+            with_header_tokens = counter.count(with_header)
+            if with_header_tokens <= CHUNK_TOKEN_LIMIT:
+                buffer_text = with_header
+                buffer_tokens = with_header_tokens
+                buffer_count = 1
+                buffer_first_locator = locator
+                buffer_last_locator = locator
+                buffer_region = None
+                buffer_table_key = table_key
+                return
+            _split_long_text_with_cursor(
+                pending,
+                locator,
+                counter,
+                output,
+                prefix=f"{current_table_header}\n",
+            )
+            return
+        if pending_tokens <= CHUNK_TOKEN_LIMIT:
+            buffer_text = pending
+            buffer_tokens = pending_tokens
+            buffer_count = 1
+            buffer_first_locator = locator
+            buffer_last_locator = locator
+            buffer_region = None
+            buffer_table_key = table_key
+            return
+        _split_long_text_with_cursor(pending, locator, counter, output)
 
     for block in blocks:
         pending = block.text.strip()
         if not pending:
             continue
-        region = _merge_region_key(block)
         pending_tokens = counter.count(pending)
+        table_key = _table_group_key(block)
+        if table_key is not None:
+            is_new_table = table_key != current_table_key
+            if is_new_table:
+                flush_buffer()
+                current_table_key = table_key
+                current_table_header = pending
+                current_table_header_tokens = pending_tokens
+                start_table_buffer(
+                    pending, pending_tokens, block.locator, table_key, prepend_header=False
+                )
+                continue
+            if buffer_count > 0 and buffer_table_key == table_key:
+                candidate_text = f"{buffer_text}\n{pending}"
+                candidate_tokens = counter.count(candidate_text)
+                if candidate_tokens <= CHUNK_TOKEN_LIMIT:
+                    buffer_text = candidate_text
+                    buffer_tokens = candidate_tokens
+                    buffer_count += 1
+                    buffer_last_locator = block.locator
+                    continue
+                flush_buffer()
+            start_table_buffer(
+                pending, pending_tokens, block.locator, table_key, prepend_header=True
+            )
+            continue
+
+        if current_table_key is not None:
+            flush_buffer()
+            reset_table_state()
+
+        region = _merge_region_key(block)
         # 同区域短文本块按换行合并，减少碎片切片数量并改善语义检索上下文完整度。
         if region is not None and pending_tokens <= CHUNK_TOKEN_LIMIT:
             if buffer_count > 0 and buffer_region == region:
@@ -438,7 +654,7 @@ def _make_chunks(
             buffer_region = region
             continue
 
-        # 单长块或非纯文本块（如表格）先结算已有缓冲，再执行严格 O(N) 游标切分。
+        # 代码块、无表标识的表格块或超长单块先结算已有缓冲，再独立输出或执行游标切分。
         flush_buffer()
         if pending_tokens <= CHUNK_TOKEN_LIMIT:
             output.append((pending, asdict(block.locator), pending_tokens))
@@ -448,15 +664,24 @@ def _make_chunks(
     return output
 
 
-def _largest_prefix_from(text: str, start: int, counter: TokenCounterPort, limit: int) -> int:
-    """从游标 start 起以指数倍增探测上界再局部二分，返回满足 token 上限的最大右端点。"""
+def _largest_prefix_from(
+    text: str,
+    start: int,
+    counter: TokenCounterPort,
+    limit: int,
+    *,
+    prefix: str = "",
+) -> int:
+    """从游标 start 起以指数倍增探测再局部二分，返回带 prefix 满足 token 上限的最大右端点。"""
     remaining = len(text) - start
     if remaining <= 1:
         return len(text)
     low = 0
     probe = min(remaining, 64)
     while True:
-        if counter.count(text[start : start + probe]) <= limit:
+        segment = text[start : start + probe]
+        candidate = f"{prefix}{segment}" if prefix else segment
+        if counter.count(candidate) <= limit:
             low = probe
             if probe == remaining:
                 return len(text)
@@ -467,7 +692,9 @@ def _largest_prefix_from(text: str, start: int, counter: TokenCounterPort, limit
     low = max(1, low)
     while low < high:
         middle = (low + high + 1) // 2
-        if counter.count(text[start : start + middle]) <= limit:
+        segment = text[start : start + middle]
+        candidate = f"{prefix}{segment}" if prefix else segment
+        if counter.count(candidate) <= limit:
             low = middle
         else:
             high = middle - 1

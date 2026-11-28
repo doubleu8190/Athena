@@ -17,7 +17,10 @@ from PIL import Image, ImageDraw
 from pptx import Presentation
 from pptx.util import Inches
 
-from infrastructure.knowledge.parsers import LocalDocumentParser
+from infrastructure.knowledge.parsers import (
+    LocalDocumentParser,
+    _strip_repeated_pdf_headers_footers,
+)
 
 
 def _pdf(text: str) -> bytes:
@@ -728,3 +731,251 @@ def test_pdf_skips_tiny_decorative_images_before_ocr() -> None:
     assert ocr.calls == 0
     assert len(result.blocks) == 1
     assert result.blocks[0].locator.kind == "pdf"
+
+
+def _multi_page_pdf(pages: list[list[str]]) -> bytes:
+    """构造多页真实 PDF 字节流，每页按行自上而下排布 ASCII 文本，供 PDFium 解析测试。"""
+    # 对象 1: Catalog, 对象 2: Pages, 对象 3: Font, 之后每页占 2 个对象 (Page + Stream)
+    font_obj_num = 3
+    page_obj_nums: list[int] = []
+    page_and_stream_objs: list[bytes] = []
+    next_num = 4
+    for lines in pages:
+        page_num = next_num
+        stream_num = next_num + 1
+        next_num += 2
+        page_obj_nums.append(page_num)
+        commands: list[str] = ["BT /F1 12 Tf"]
+        y = 760
+        for line in lines:
+            escaped = line.replace("\\", "\\\\").replace("(", "\\(").replace(")", "\\)")
+            commands.append(f"1 0 0 1 40 {y} Tm ({escaped}) Tj")
+            y -= 24
+        commands.append("ET")
+        stream_bytes = "\n".join(commands).encode()
+        page_and_stream_objs.append(
+            f"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] "
+            f"/Resources << /Font << /F1 {font_obj_num} 0 R >> >> "
+            f"/Contents {stream_num} 0 R >>".encode()
+        )
+        page_and_stream_objs.append(
+            b"<< /Length "
+            + str(len(stream_bytes)).encode()
+            + b" >>\nstream\n"
+            + stream_bytes
+            + b"\nendstream"
+        )
+    kids = " ".join(f"{num} 0 R" for num in page_obj_nums)
+    objects: list[bytes] = [
+        b"<< /Type /Catalog /Pages 2 0 R >>",
+        f"<< /Type /Pages /Kids [{kids}] /Count {len(pages)} >>".encode(),
+        b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+        *page_and_stream_objs,
+    ]
+    output = bytearray(b"%PDF-1.4\n")
+    offsets = [0]
+    for number, body in enumerate(objects, 1):
+        offsets.append(len(output))
+        output.extend(f"{number} 0 obj\n".encode() + body + b"\nendobj\n")
+    xref = len(output)
+    output.extend(f"xref\n0 {len(offsets)}\n0000000000 65535 f \n".encode())
+    for offset in offsets[1:]:
+        output.extend(f"{offset:010d} 00000 n \n".encode())
+    output.extend(
+        f"trailer\n<< /Size {len(offsets)} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF".encode()
+    )
+    return bytes(output)
+
+
+def test_markdown_parser_tracks_heading_stack_and_keeps_fenced_code_blocks_intact() -> None:
+    """Markdown 解析应维护多级标题面包屑，并将围栏代码块完整隔离且忽略内部 # 注释。"""
+    source = "\n".join(
+        [
+            "# 第一章 架构",
+            "总览正文",
+            "## 1.1 检索链路 ##",
+            "### 细节说明",
+            "```python",
+            "# 代码内部注释不是标题",
+            "ellipsis = '......'",
+            "print(ellipsis)",
+            "```",
+            "## 1.2 向量索引",
+            "~~~bash",
+            "# shell 注释",
+            "echo ok",
+            "~~~",
+            "索引收尾正文",
+        ]
+    )
+    result = asyncio.run(LocalDocumentParser().parse("guide.md", source.encode()))
+
+    assert [
+        (b.kind, b.locator.heading, b.locator.start_line, b.locator.end_line) for b in result.blocks
+    ] == [
+        ("text", "第一章 架构", 1, 1),
+        ("text", "第一章 架构", 2, 2),
+        ("text", "第一章 架构 > 1.1 检索链路", 3, 3),
+        ("text", "第一章 架构 > 1.1 检索链路 > 细节说明", 4, 4),
+        ("code", "第一章 架构 > 1.1 检索链路 > 细节说明", 5, 9),
+        ("text", "第一章 架构 > 1.2 向量索引", 10, 10),
+        ("code", "第一章 架构 > 1.2 向量索引", 11, 14),
+        ("text", "第一章 架构 > 1.2 向量索引", 15, 15),
+    ]
+    # 代码块内部注释与点线必须原样保留，不误触发标题栈变化或目录点线清洗。
+    assert "# 代码内部注释不是标题" in result.blocks[4].text
+    assert "ellipsis = '......'" in result.blocks[4].text
+    assert "# shell 注释" in result.blocks[6].text
+
+
+def test_markdown_parser_handles_inline_triple_backticks_nested_and_unclosed_fences() -> None:
+    """行首三反引号行内代码不得误开围栏；嵌套围栏与未闭合围栏应正确归组为代码块。"""
+    source = "\n".join(
+        [
+            "# 语法边界",
+            "``` `foo` ``` 行首行内代码说明",
+            "## 嵌套示例",
+            "````markdown",
+            "```python",
+            "# 嵌套块内注释",
+            "```",
+            "````",
+            "## 末尾未闭合",
+            "```yaml",
+            "key: value",
+        ]
+    )
+    result = asyncio.run(LocalDocumentParser().parse("edge.md", source.encode()))
+
+    assert [
+        (b.kind, b.locator.heading, b.locator.start_line, b.locator.end_line) for b in result.blocks
+    ] == [
+        ("text", "语法边界", 1, 1),
+        ("text", "语法边界", 2, 2),
+        ("text", "语法边界 > 嵌套示例", 3, 3),
+        ("code", "语法边界 > 嵌套示例", 4, 8),
+        ("text", "语法边界 > 末尾未闭合", 9, 9),
+        ("code", "语法边界 > 末尾未闭合", 10, 11),
+    ]
+    assert result.blocks[1].text == "``` `foo` ``` 行首行内代码说明"
+    assert "```python\n# 嵌套块内注释\n```" in result.blocks[3].text
+    assert result.blocks[5].text == "```yaml\nkey: value"
+
+
+def test_text_and_markdown_clean_toc_dot_leaders_without_breaking_decimals_or_ellipsis() -> None:
+    """目录引导点线应被压缩为单空格，但小数、版本号与三点省略号必须保持原样。"""
+    content = (
+        "第一章 概述 .............. 12\n"
+        "第二章 方案 . . . . . 28\n"
+        "第三章 结论 ······ 45\n"
+        "第四章 附录 ………… 60\n"
+        "版本号 v2.1 与圆周率 3.14 以及省略号... 与中文……均应保留\n"
+    ).encode()
+
+    txt_result = asyncio.run(LocalDocumentParser().parse("toc.txt", content))
+    md_result = asyncio.run(LocalDocumentParser().parse("toc.md", content))
+
+    expected = [
+        "第一章 概述 12",
+        "第二章 方案 28",
+        "第三章 结论 45",
+        "第四章 附录 60",
+        "版本号 v2.1 与圆周率 3.14 以及省略号... 与中文……均应保留",
+    ]
+    assert [block.text for block in txt_result.blocks] == expected
+    assert [block.text for block in md_result.blocks] == expected
+
+
+def test_pdf_strips_repeated_headers_and_footers_for_three_or_more_pages_only() -> None:
+    """PDF 非空页数 >= 3 时自动剔除跨页重复页眉/页脚，不足 3 页不误删，单行页不被删空。"""
+    four_page_pdf = _multi_page_pdf(
+        [
+            ["Athena Internal Spec", "Chapter 1 Overview content", "Page 1 of 4"],
+            ["Athena Internal Spec", "Chapter 2 Architecture content", "Page 2 of 4"],
+            ["Athena Internal Spec", "Chapter 3 Indexing content", "Page 3 of 4"],
+            ["Athena Internal Spec", "Chapter 4 Retrieval content", "Page 4 of 4"],
+        ]
+    )
+    parser = LocalDocumentParser(enable_ocr=False)
+    four_result = asyncio.run(parser.parse("spec.pdf", four_page_pdf))
+    assert len(four_result.blocks) == 4
+    for idx, block in enumerate(four_result.blocks, 1):
+        assert block.locator.page == idx
+        assert "Athena Internal Spec" not in block.text
+        assert f"Page {idx} of 4" not in block.text
+        assert f"Chapter {idx}" in block.text
+
+    two_page_pdf = _multi_page_pdf(
+        [
+            ["Athena Internal Spec", "Short doc page 1", "Page 1 of 2"],
+            ["Athena Internal Spec", "Short doc page 2", "Page 2 of 2"],
+        ]
+    )
+    two_result = asyncio.run(parser.parse("short.pdf", two_page_pdf))
+    assert len(two_result.blocks) == 2
+    assert "Athena Internal Spec" in two_result.blocks[0].text
+    assert "Page 1 of 2" in two_result.blocks[0].text
+
+    # 单行页不可作为页脚被删空。
+    single_line_preserved = _strip_repeated_pdf_headers_footers(
+        [
+            "Alpha section body\nFooter 1",
+            "Beta section body\nFooter 2",
+            "Gamma section body\nFooter 3",
+            "Footer 4",
+        ]
+    )
+    assert single_line_preserved == [
+        "Alpha section body",
+        "Beta section body",
+        "Gamma section body",
+        "Footer 4",
+    ]
+
+
+def test_pdf_header_footer_stripping_does_not_trigger_fallback_ocr_on_short_native_pages() -> None:
+    """原生短正文 PDF 剔除页眉/页脚后不足 min_pdf_chars，不得误触发整页回退 OCR。"""
+    three_page_pdf = _multi_page_pdf(
+        [
+            ["Athena Internal Spec Header", "Alpha", "Page 1 of 3"],
+            ["Athena Internal Spec Header", "Beta", "Page 2 of 3"],
+            ["Athena Internal Spec Header", "Gamma", "Page 3 of 3"],
+        ]
+    )
+
+    class _CountingOcr(_FakeOcr):
+        calls = 0
+
+        def predict(self, *, input: Any) -> list[SimpleNamespace]:
+            self.calls += 1
+            return super().predict(input=input)
+
+    ocr = _CountingOcr()
+    parser = LocalDocumentParser(min_pdf_chars=24, ocr_engine=ocr, enable_ocr=True)
+    result = asyncio.run(parser.parse("short-body.pdf", three_page_pdf))
+
+    assert ocr.calls == 0
+    assert [(block.locator.kind, block.locator.page, block.text) for block in result.blocks] == [
+        ("pdf", 1, "Alpha"),
+        ("pdf", 2, "Beta"),
+        ("pdf", 3, "Gamma"),
+    ]
+
+
+def test_pdf_strips_headers_and_footers_repeated_on_two_of_three_pages() -> None:
+    """3 页 PDF 中 2 页重复页眉/页脚（66.7% >= 60%，如第 1 页为封面）应被正确剔除。"""
+    cover_and_body_pdf = _multi_page_pdf(
+        [
+            ["Annual Report Cover Title", "Published in 2026"],
+            ["Confidential Header", "Section 1 Revenue Details", "Page 2"],
+            ["Confidential Header", "Section 2 Cost Analysis", "Page 3"],
+        ]
+    )
+    parser = LocalDocumentParser(enable_ocr=False)
+    result = asyncio.run(parser.parse("report.pdf", cover_and_body_pdf))
+
+    assert len(result.blocks) == 3
+    assert "Annual Report Cover Title" in result.blocks[0].text
+    assert "Published in 2026" in result.blocks[0].text
+    assert result.blocks[1].text == "Section 1 Revenue Details"
+    assert result.blocks[2].text == "Section 2 Cost Analysis"

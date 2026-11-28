@@ -74,6 +74,7 @@ class KnowledgeJobStore:
                         KnowledgeJobModel.lease_until > func.clock_timestamp(),
                     )
                 )
+                # 限制单用户并发占用的任务数，避免过度占用数据库连接池与 CPU 资源。
                 if int(active_count or 0) >= owner_concurrency:
                     continue
                 job = await session.scalar(

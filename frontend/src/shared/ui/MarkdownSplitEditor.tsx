@@ -53,6 +53,9 @@ export interface MarkdownSplitEditorProps {
   error?: string | null;
   describedBy?: string;
   rows?: number;
+  /** 编辑/预览主体容器的固定高度类，确保分栏双侧等高与各自内部滚动。 */
+  heightClassName?: string;
+  /** 保留向下兼容的最小高度类，作用于主体容器以防止高度过小导致内容塌陷。 */
   minHeightClassName?: string;
   /** 提供时在工具栏右侧渲染「导入 .md」按钮，校验 .md 后缀后回调上层处理。 */
   onImportMarkdownFile?: (file: File) => void;
@@ -220,12 +223,13 @@ export function MarkdownSplitEditor({
   disabled = false,
   error,
   headerExtra,
+  heightClassName = "h-[320px] sm:h-[360px]",
   id,
   importTriggerLabel = "导入 .md",
   importingMarkdown = false,
   label,
   maxLength,
-  minHeightClassName = "min-h-[260px]",
+  minHeightClassName,
   onChange,
   onImportMarkdownFile,
   placeholder,
@@ -505,11 +509,13 @@ export function MarkdownSplitEditor({
           </div>
         </div>
 
-        {/* 编辑 / 预览主体：分栏模式下桌面端左右等宽，窄屏自动切单栏 Tabs */}
+        {/* 编辑 / 预览主体：固定容器高度使左右两栏严格等高、各自内部滚动，且三态切换高度一致 */}
         <div
           aria-labelledby={activeTabId}
           className={cn(
-            "grid min-w-0",
+            "grid min-h-0 min-w-0",
+            heightClassName,
+            minHeightClassName,
             effectiveMode === "split"
               ? "grid-cols-1 divide-y divide-border-subtle lg:grid-cols-2 lg:divide-x lg:divide-y-0"
               : "grid-cols-1",
@@ -518,17 +524,16 @@ export function MarkdownSplitEditor({
           role="tabpanel"
         >
           {showEditorPane ? (
-            <div className="min-w-0">
+            <div className="h-full min-h-0 min-w-0">
               <textarea
                 aria-describedby={computedDescribedBy || undefined}
                 aria-invalid={hasError ? true : undefined}
                 aria-label={label}
                 className={cn(
-                  "block w-full resize-y border-0 bg-canvas px-3.5 py-3 font-mono text-[13px] leading-relaxed text-text-primary",
+                  "block h-full w-full resize-none overflow-y-auto border-0 bg-canvas px-3.5 py-3 font-mono text-[13px] leading-relaxed text-text-primary",
                   "placeholder:text-text-placeholder",
                   "focus-visible:outline-hidden",
                   "disabled:cursor-not-allowed disabled:bg-subtle disabled:text-text-tertiary",
-                  minHeightClassName,
                 )}
                 disabled={disabled || importingMarkdown}
                 id={id}
@@ -549,10 +554,7 @@ export function MarkdownSplitEditor({
           {showPreviewPane ? (
             <div
               aria-label="Markdown 实时预览"
-              className={cn(
-                "min-w-0 overflow-y-auto bg-subtle/40 px-4 py-3 text-sm text-text-primary",
-                minHeightClassName,
-              )}
+              className="h-full min-h-0 min-w-0 overflow-y-auto bg-subtle/40 px-4 py-3 text-sm text-text-primary"
               data-testid="markdown-split-preview"
             >
               {deferredPreviewValue.trim().length > 0 ? (

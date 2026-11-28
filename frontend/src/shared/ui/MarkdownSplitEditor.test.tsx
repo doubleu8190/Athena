@@ -374,4 +374,53 @@ describe("MarkdownSplitEditor", () => {
     ).toBeInTheDocument();
     expect(within(preview).getByText("关键结论收敛")).toBeInTheDocument();
   });
+
+  it("主体容器默认固定高度且双栏内部独立滚动，支持自定义 heightClassName", async () => {
+    mockMatchMedia(true);
+    const user = userEvent.setup();
+
+    const { rerender } = render(
+      <ControlledEditor
+        id="fixed-height-guide"
+        initialValue={"# 固定高度测试\n\n长文内容"}
+        label="固定高度正文"
+      />,
+    );
+
+    const panel = screen.getByRole("tabpanel");
+    const textarea = screen.getByLabelText("固定高度正文");
+    const preview = screen.getByTestId("markdown-split-preview");
+
+    // 默认 tabpanel 具备固定高度类与 min-h-0
+    expect(panel).toHaveClass("h-[320px]", "sm:h-[360px]", "min-h-0");
+
+    // 编辑区外层与 textarea 均撑满固定高度并禁止纵向拖拽，内部独立滚动
+    expect(textarea.parentElement).toHaveClass("h-full", "min-h-0", "min-w-0");
+    expect(textarea).toHaveClass("h-full", "w-full", "resize-none", "overflow-y-auto");
+    expect(textarea).not.toHaveClass("resize-y");
+
+    // 预览区撑满固定高度并内部独立滚动
+    expect(preview).toHaveClass("h-full", "min-h-0", "min-w-0", "overflow-y-auto");
+
+    // 切换至「仅编辑」与「仅预览」后，主体容器固定高度类保持一致
+    await user.click(screen.getByRole("tab", { name: "仅编辑" }));
+    expect(screen.getByRole("tabpanel")).toHaveClass("h-[320px]", "sm:h-[360px]", "min-h-0");
+
+    await user.click(screen.getByRole("tab", { name: "仅预览" }));
+    expect(screen.getByRole("tabpanel")).toHaveClass("h-[320px]", "sm:h-[360px]", "min-h-0");
+
+    // 传入自定义 heightClassName 覆盖默认高度类，并保留 minHeightClassName 向下兼容
+    rerender(
+      <ControlledEditor
+        heightClassName="h-[480px]"
+        id="fixed-height-guide"
+        initialValue={"# 固定高度测试\n\n长文内容"}
+        label="固定高度正文"
+        minHeightClassName="min-h-[300px]"
+      />,
+    );
+    const updatedPanel = screen.getByRole("tabpanel");
+    expect(updatedPanel).toHaveClass("h-[480px]", "min-h-[300px]");
+    expect(updatedPanel).not.toHaveClass("h-[320px]", "sm:h-[360px]");
+  });
 });
